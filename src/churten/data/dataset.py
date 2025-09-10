@@ -15,30 +15,6 @@ from tensordict import MemoryMappedTensor
 from tensordict import TensorClass
 from tensordict import TensorDict
 
-class Collate(Module):
-    def __init__(
-        self, 
-        transform=None, 
-        device:str="cpu",
-    ):
-        super().__init__()
-        self.transform = transform
-        self.device = torch.device(device)
-
-    def __call__(self, x: TabularDataset):
-        # move data to RAM
-        if self.device.type == "cuda":
-            out = x.pin_memory()
-        else:
-            out = x
-        if self.device:
-            # move data to gpu
-            out = out.to(self.device)
-        if self.transform:
-            # apply transforms on gpu
-            out.inputs = self.transform(out.inputs)
-        return out
-
 class TabularDataset(TensorClass):
     inputs : Tensor
     targets : Tensor
@@ -136,6 +112,30 @@ class TabularDataset(TensorClass):
 
             i += _batch
         return data
+
+#class Collate(Module):
+#    def __init__(
+#        self, 
+#        transform=None,
+#        device:str="cpu",
+#    ):
+#        super().__init__()
+#        self.transform = transform
+#        self.device = torch.device(device)
+#
+#    def __call__(self, x: TabularDataset):
+#        # move data to RAM
+#        if self.device.type == "cuda":
+#            out = x.pin_memory()
+#        else:
+#            out = x
+#        if self.device:
+#            # move data to gpu
+#            out = out.to(self.device)
+#        if self.transform:
+#            # apply transforms on gpu
+#            out.inputs = self.transform(out.inputs)
+#        return out
 
 
 

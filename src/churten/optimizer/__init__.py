@@ -1,8 +1,8 @@
-#from .setter import *
+from .setter import *
 from .grad_transform import *
 from .adam import *
 __all__ = [  
-            #"optimizer_setter", 
+            "optimizer_setter", 
             "GradientTransformations", "OptimState",
             "FuncAdam", "AdamOptState",
 ]

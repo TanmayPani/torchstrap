@@ -1,7 +1,7 @@
 from . import nn 
-from . import transforms
+from . import transform
 
 __all__ = [
     "nn",
-    "transforms"
+    "transform"
 ]
