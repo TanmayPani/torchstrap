@@ -5,7 +5,10 @@ build/
 dist/
 wheels/
 *.egg-info
-*.memmap
+#*.memmap
+
+# Unrelated files
+*.tar.gz
 
 # Virtual environments
 .venv
