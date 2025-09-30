@@ -6,6 +6,7 @@ from typing import Optional
 from typing import Protocol, runtime_checkable
 from collections.abc import Sequence
 
+from tensordict import TensorDict
 import torch
 from torch import LongTensor
 from torch import Tensor, Size
@@ -50,6 +51,7 @@ class Collate:
     def __init__(
         self,
         data : DatasetLike,
+        keys : Optional[list[str]] = None,
     ):
         self.dataset = data
         if isinstance(self.dataset, TensorLike):
@@ -62,7 +64,7 @@ class Collate:
     def __call__(self, idx : Tensor):
         return self.call_fn(idx)
     
-    def getitem_tensor(self, idx : Tensor):
+    def getitem_tensor(self, idx : TensorLike):
         flattened_idx = torch.flatten(idx)
         return self.dataset[flattened_idx].reshape(idx.shape)
 
@@ -76,6 +78,22 @@ class Collate:
             [self.dataset[i] for i in idx.tolist()], 
             dim=0,
         ).reshape(idx.shape)
+
+class TensorDictCollate:
+    def __init__(
+        self,
+        data : TensorDict,
+        keys : list[str] = []
+    ) -> None:
+        
+        self.dataset = data
+        self.keys = data.keys() if len(keys) == 0 else keys
+    
+    def __call__(self, idx : Tensor) -> Any:
+        flattened_idx = torch.flatten(idx)
+        res = self.dataset[flattened_idx].reshape(idx.shape)
+        return (res[k] for k in self.keys)
+
 
 def get_stacked_batch_loader(
     dataset: DatasetLike,

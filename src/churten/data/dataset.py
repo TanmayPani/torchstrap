@@ -1,151 +1,75 @@
 from __future__ import annotations
-from dataclasses import field
-from typing import Optional, Self, Sequence
-from numpy.ma import indices
+from typing import Optional
 import tqdm
-import numpy as np
+
 import pyarrow as pa
 
 import torch
-from torch import as_tensor
 from torch import Tensor
-from torch.nn import Module
+from torch.utils.data import Dataset, TensorDataset
 
 from tensordict import MemoryMappedTensor
-from tensordict import TensorClass
 from tensordict import TensorDict
 
-class TabularDataset(TensorClass):
-    inputs : Tensor
-    targets : Tensor
-    sample_weights : Tensor
-    indices : Tensor
-    stratification : Optional[Tensor] = None
+class TensorDictDataset(Dataset[TensorDict | tuple[Tensor, ...]]):
+    _tensordict : TensorDict
+    def __init__(self, td : TensorDict, **tensors : Tensor) -> None:
+        self._tensordict = td
+        self._tdict_extra = TensorDict(**tensors, batch_size=self._tensordict.batch_size)
 
-    def unpack_data(self):
-        return self.inputs, self.targets, self.sample_weights
+    def __getitem__(self, index):
+        return self._tensordict[index]
 
-    @classmethod
-    def from_arrow(
-        cls, 
-        input_table : pa.Table,
-        targets : np.ndarray,
-        sample_weights : Optional[np.ndarray] = None,
-        *,
-        column_names : list[str] = [],
-        stratification : Optional[str | np.ndarray] = None,
-        dtype = torch.float32,
-        prefix : Optional[str] = None, 
-        max_write_chunk = None,
-        index_offset : int = 0,
-    ):
-       
-        _stratification = None
-        if isinstance(stratification, str):
-            if stratification in input_table.column_names:
-                _stratification = input_table[stratification].to_numpy()
-        else:
-            _stratification = stratification
-
-        if len(column_names) > 0:
-            input_table = input_table.select(column_names)
-        else:
-            column_names = input_table.column_names 
- 
-        _stratification_tensor = None
-        if isinstance(_stratification, np.ndarray):
-            _stratification = np.stack([np.asarray(targets), _stratification], axis=-1)
-            _stratification_tensor = as_tensor(_stratification, dtype=torch.int)
-
-        if sample_weights is None:
-            sample_weights = np.ones(len(input_table))
-        try:
-            assert len(targets) == len(input_table)
-            assert len(sample_weights) == len(input_table)
-        except AssertionError:
-            raise ValueError("input pa.Table and the ndarrays targets and" 
-                             "sample_weights must all have the same lengths"
-                             f"but got them with lengths {(len(input_table), len(targets), len(sample_weights))}" 
-                             "respectively...")
+    def __len__(self):
+        return self._tensordict.size(0)
 
 
-        target_tensor = as_tensor(targets, dtype=dtype).unsqueeze_(1)
-        sample_weights_tensor = as_tensor(sample_weights, dtype=dtype).unsqueeze_(1)
-        index_tensor = torch.arange(len(input_table))+index_offset
+def arrow_to_tensordict(
+    table : pa.Table,
+    target : Optional[Tensor] = None,
+    weight : Optional[Tensor] = None,
+    *,
+    labels : dict[str, Tensor] = {},
+    dtype : torch.dtype = torch.float32,
+    columns : Optional[list[str]] = None,
+    prefix : Optional[str] = None,
+    max_write_chunk : Optional[int] = None,
+):
+    columns = columns if columns is not None else table.column_names
+    input_table = table.select(columns)
 
-        _stratification_init = MemoryMappedTensor.empty_like(
-            _stratification_tensor,
-        ) if _stratification_tensor is not None else None
+    data = TensorDict(
+        dict(
+            input = torch.zeros((len(columns),), dtype=dtype),
+            target = torch.zeros((), dtype=dtype),
+            weight = torch.ones((), dtype=dtype),
+            **{key : torch.zeros((), dtype=label.dtype) for key, label in labels.items()},
+        ),
+        batch_size=[],
+    ).expand(len(table)).memmap_like(prefix=prefix)
 
-        data = cls(
-            inputs = MemoryMappedTensor.empty((len(input_table), len(column_names),), dtype=dtype),
-            targets = MemoryMappedTensor.empty_like(target_tensor),
-            sample_weights = MemoryMappedTensor.empty_like(sample_weights_tensor),
-            indices = MemoryMappedTensor.empty_like(index_tensor),
-            stratification = _stratification_init,
-            batch_size=[len(input_table)],
-            device="cpu"
+    rbatches = input_table.to_batches(max_chunksize=max_write_chunk)
+
+    target = target if target is not None else torch.zeros(len(input_table))
+    weight = weight if weight is not None else torch.ones(len(input_table))
+   
+    i = 0
+    pbar = tqdm.tqdm(total=len(input_table))
+    for rbatch in rbatches:
+        batch_size = len(rbatch)
+        pbar.update(batch_size)
+        batch  = TensorDict(
+            dict(
+                input = torch.as_tensor(list(zip(*rbatch.to_pydict().values())), dtype=dtype),
+                target = target[i : i + batch_size],
+                weight = weight[i : i + batch_size],
+                **{k : v[i:i+batch_size] for k, v in labels.items()},
+            ),
+            batch_size=(batch_size,),
+            device="cpu",
         )
 
-        data.memmap_(prefix=prefix)
-
-        rbatches = input_table.to_batches(max_chunksize=max_write_chunk)
-
-        print(f"num_batches : {len(rbatches)}")
-        
-        i = 0
-        pbar = tqdm.tqdm(total=len(input_table))
-        for rbatch in rbatches:
-            _batch = len(rbatch)
-            #print(f"Writing {i} to {i+_batch}...")
-            pbar.update(_batch)
-            _inputs_pylist = list(zip(*rbatch.to_pydict().values()))
-            data[i : i + _batch] = cls(
-                inputs = as_tensor(_inputs_pylist, dtype=dtype),
-                targets = target_tensor[i : i + _batch],
-                sample_weights = sample_weights_tensor[i : i + _batch],
-                indices = index_tensor[i:i+_batch],
-                stratification = _stratification_tensor[i : i + _batch] if _stratification_tensor is not None else None,
-                batch_size=[_batch],
-                device="cpu"
-            )
-
-            i += _batch
-        return data
-
-#class Collate(Module):
-#    def __init__(
-#        self, 
-#        transform=None,
-#        device:str="cpu",
-#    ):
-#        super().__init__()
-#        self.transform = transform
-#        self.device = torch.device(device)
-#
-#    def __call__(self, x: TabularDataset):
-#        # move data to RAM
-#        if self.device.type == "cuda":
-#            out = x.pin_memory()
-#        else:
-#            out = x
-#        if self.device:
-#            # move data to gpu
-#            out = out.to(self.device)
-#        if self.transform:
-#            # apply transforms on gpu
-#            out.inputs = self.transform(out.inputs)
-#        return out
-
-
-
-
-
-
-
-
-
-
-
-
+        data[i : i + batch_size] = batch
+        i += batch_size
+    return data
 

@@ -19,7 +19,6 @@ class AdamOptState(OptimState):
     exp_avg_sqs : TensorDictBase = field(default_factory = TensorDict)
     max_exp_avg_sqs : TensorDictBase = field(default_factory = TensorDict)
     state_steps : TensorDictBase = field(default_factory = TensorDict)
-    lr: Tensor = field(default=torch.as_tensor(1e-3, dtype=torch.float32))
     beta1: Tensor = field(default=torch.as_tensor(0.9, dtype=torch.float32))
     beta2: Tensor = field(default=torch.as_tensor(0.999, dtype=torch.float32))
     eps: Tensor = field(default=torch.as_tensor(1e-8, dtype=torch.float32))
@@ -59,20 +58,30 @@ class AdamOptState(OptimState):
         self.max_exp_avg_sqs = deepcopy(self.params).zero_()
         for param_name in self.params.keys():
             self.state_steps[param_name] = torch.zeros(
-                self.batch_size, dtype=torch.float32, device=self.device,
+                self.batch_size, dtype=torch.float32, device=self.params.device,
             )
 
-    def update_args(self) -> tuple[list[Any], dict[str, Any]]:
-        args, kwargs = super().update_args()
+        #self.beta1 = self.beta1.to(dtype=torch.float32, device=self.params.device)
+        #self.beta2 = self.beta2.to(dtype=torch.float32, device=self.params.device)
+        #self.eps = self.eps.to(dtype=torch.float32, device=self.params.device)
+        #self.weight_decay = self.weight_decay.to(dtype=torch.float32, device=self.params.device)
 
-        args.extend([
+        #if torch.is_tensor(self.grad_scale):
+        #    self.grad_scale = self.grad_scale.to(dtype=torch.float32, device=self.params.device)
+        #if torch.is_tensor(self.found_inf):
+        #    self.found_inf = self.found_inf.to(dtype=torch.float32, device=self.params.device)
+
+    def set_update_args(self) -> tuple[list[Any], dict[str, Any]]:
+        self._update_args = super().set_update_args()
+
+        self._update_args[0].extend([
             list(self.exp_avgs.values()       ), 
             list(self.exp_avg_sqs.values()    ), 
             list(self.max_exp_avg_sqs.values()), 
             list(self.state_steps.values()    ),
         ])
 
-        args.extend([
+        self._update_args[0].extend([
             getattr(self, key) for key in  (
                 "foreach",
                 "capturable",
@@ -85,9 +94,8 @@ class AdamOptState(OptimState):
             )
         ])
 
-        kwargs.update({
+        self._update_args[1].update({
             key : self.__dict__["_tensordict"][key] for key in (
-                "lr", 
                 "beta1", 
                 "beta2",
                 "weight_decay",
@@ -97,7 +105,7 @@ class AdamOptState(OptimState):
             )
         })
 
-        return args, kwargs
+        return self._update_args
 
 
 class FuncAdam(GradientTransformations):
@@ -109,16 +117,22 @@ class FuncAdam(GradientTransformations):
         weight_decay: float = 0,
         amsgrad: bool = False,
         *,
-        foreach: bool = False,
         maximize: bool = False,
-        capturable: bool = True,
         differentiable: bool = False,
-        fused: bool = True,
         decoupled_weight_decay: bool = False,
         batch_size : Sequence[int] = [],
+        device : str = "cpu",
         **kwargs,
     ):
-        
+        if device == "cpu": 
+            capturable = False 
+            fused = False
+            foreach = False
+        else:
+            capturable = True
+            fused = True
+            foreach = False
+       
         optim_state = {
             "lr"                     : make_tensor_attr("lr"                    , lr                    , batch_size=batch_size ),
             "beta1"                  : make_tensor_attr("betas[0]"              , betas[0]              , batch_size=batch_size ), 
@@ -133,9 +147,9 @@ class FuncAdam(GradientTransformations):
             "differentiable"         : make_non_tensor_attr("differentiable"        , differentiable        , batch_size=batch_size ),
             "fused"                  : make_non_tensor_attr("fused"                 , fused                 , batch_size=batch_size ),
             "decoupled_weight_decay" : make_non_tensor_attr("decoupled_weight_decay", decoupled_weight_decay, batch_size=batch_size ),
-            "batch_size" : batch_size
+            "batch_size" : batch_size,
         }
-        super().__init__(AdamOptState(**optim_state), **kwargs)
+        super().__init__(AdamOptState(**optim_state) ,device=device, **kwargs)
 
 
     @classmethod

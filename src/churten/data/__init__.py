@@ -9,5 +9,6 @@ __all__ = [
             "TensorBatchSampler",
             "MultiSubsetBatchSampler",
             "train_test_multi_subset_samplers",
-            "TabularDataset"
+            "arrow_to_tensordict",
+            "TensorDictCollate"
 ]

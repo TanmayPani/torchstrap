@@ -1,46 +1,71 @@
+from copy import deepcopy
 from typing import Callable, Union, Protocol, Optional, Any
 from typing import runtime_checkable
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 
 import torch
-from torch.nn import ReLU
+
+from torch import Tensor, device
+
+from torch.utils import _pytree
+
+from torch.func import functional_call
+from torch.func import vmap, grad_and_value
+
+from torch.nn import Parameter
+from torch.nn import ParameterDict
+from torch.nn import Module
+
 import torch.nn.functional as F
 
+from churten.optimizer import GradientTransformations
 from churten.utils import params_for
 
 @runtime_checkable
 class TensorCallable(Protocol):
-    def __call__(self, *args : torch.Tensor, **kwargs : Optional[Any]) -> list[torch.Tensor]:
+    def __call__(
+            self,
+            #tensor : Tensor | Sequence[Tensor] | Mapping[str, Tensor],
+            *args : Any, 
+            **kwargs : Any,
+    ) -> Tensor | tuple[Tensor, ...]:
         ...
 
-type ModuleLike = Union[torch.nn.Module, type[torch.nn.Module], TensorCallable, type[TensorCallable]]
+type ModuleLike = Union[Module, type[Module], TensorCallable, type[TensorCallable]]
 
-class Lambda(torch.nn.Module):
-    def __init__(self, fn : TensorCallable):
+@torch.no_grad
+def init_to_zero(module):
+    for param in module.parameters():
+        param.zero_()
+
+
+class Lambda(Module):
+    def __init__(
+        self, fn : TensorCallable
+    ):
         super().__init__()
-        self.fn : TensorCallable = fn 
-    def forward(self, *args : torch.Tensor, **kwargs : Optional[Any])->list[torch.Tensor]:
-        return self.fn(*args, **kwargs)
+        self.forward = fn
 
-def initialize_layer(layer : ModuleLike, *args, **kwargs) -> torch.nn.Module:
-    if isinstance(layer, torch.nn.Module):
+def initialize_layer(layer : ModuleLike, *args, **kwargs) -> Module:
+    if isinstance(layer, Module):
         return layer
     
     if isinstance(layer, TensorCallable) and not isinstance(layer, type):
         return Lambda(layer)
 
-    if isinstance(layer, type) and issubclass(layer, torch.nn.Module):
+    if isinstance(layer, type) and issubclass(layer, Module):
         return layer(*args, **kwargs)
 
     return Lambda(layer(*args, **kwargs))
-    
-class Layer(torch.nn.Module):
+
+   
+class Layer(Module):
     def __init__(self,
                  module : ModuleLike,
                  input_size : int,
                  output_size : int, 
                  dropout_prob : Optional[float] = None, 
-                 batch_norm : Optional[type[torch.nn.Module]] = None, 
+                 batch_norm : Optional[type[Module]] = None, 
                  activation : Optional[ModuleLike] = None,
                  **kwargs, 
                 ):
@@ -74,7 +99,7 @@ class Layer(torch.nn.Module):
         return x
  
         
-class MLP(torch.nn.Module):
+class MLP(Module):
     def __init__(self,
                  layer : ModuleLike | list[ModuleLike] = torch.nn.Linear, 
                  activation : Optional[ModuleLike | list[Optional[ModuleLike]]] = torch.nn.ReLU, 
@@ -127,7 +152,7 @@ class MLP(torch.nn.Module):
             x = layer(x)
         return x
 
-class DNN(torch.nn.Module):
+class DNN(Module):
     def __init__(self, layer_sizes=[100, 1], dropout_prob=None, do_batch_norm=False, output_activation=None, input_transform : Optional[torch.nn.Module]=None, **kwargs):
         super().__init__()
         
@@ -161,7 +186,7 @@ class DNN(torch.nn.Module):
             #print(x)
         return x
     
-class Conv1dNN(torch.nn.Module):
+class Conv1dNN(Module):
     def __init__(self, sizes, output_activation=None, dropout_prob=None, do_batch_norm=False, **kwargs):
         super().__init__()
         
@@ -188,7 +213,7 @@ class Conv1dNN(torch.nn.Module):
             x = layer(x)
         return x
     
-class SumPooling(torch.nn.Module):
+class SumPooling(Module):
     def __init__(self, dim, mask_dim=1):
         super().__init__()
         self.dim = dim
@@ -203,7 +228,7 @@ class SumPooling(torch.nn.Module):
             x = torch.where(_new_mask, x, torch.zeros_like(x))
         return torch.sum(x, dim=self.dim)
     
-class PFN(torch.nn.Module):
+class PFN(Module):
     def __init__(self, phi_sizes, f_sizes, output_activation=None,
                  phi_dropout_prob=None, phi_do_batch_norm=False, 
                 f_dropout_prob=None, f_do_batch_norm=False):
@@ -230,7 +255,7 @@ class PFN(torch.nn.Module):
             x = layer(x)
         return x
         
-class JetNN(torch.nn.Module):
+class JetNN(Module):
     def __init__(self, phi_sizes, f_sizes, jet_dnn_sizes, output_dnn_sizes, dropout_prob=None, do_batch_norm=False):
         super().__init__()
         self.pfn = PFN(phi_sizes, f_sizes, 

@@ -65,7 +65,7 @@ def _stratified_split(
     ] 
 
 def _random_split(
-    input : Tensor,
+    input,
     sizes : Sequence[float | int],
     stratify : Optional[Tensor] = None,
     generator : Optional[Generator] = None,
@@ -86,7 +86,7 @@ def _random_split(
         )
 
 def random_split(
-    *inputs : Tensor,
+    *inputs,
     sizes : Sequence[float | int],
     stratify : Optional[Tensor] = None,
     generator : Optional[Generator] = None,
@@ -104,7 +104,7 @@ def random_split(
     return [input[idx] for idx in index_splits for input in inputs]
 
 def undersample(
-    *inputs : Tensor,
+    *inputs,
     size : float | int,
     stratify : Optional[Tensor] = None,
     generator : Optional[Generator] = None,
@@ -218,16 +218,17 @@ class MultiSubsetBatchSampler(TensorBatchSampler):
         super().__init__(stacked_indices, batch_size=batch_size, batch_dim=1, drop_last=drop_last)
 
 def train_test_multi_subset_samplers(
-    dataset: Sized, 
+    indices: Tensor, 
     train_size : float | int,
     subsample_size : float | int = 1.0,
     num_replicas : int = 2,
     batch_size : int = 32,
+    generators : Optional[list[Generator]] = None,
     seed : Optional[int] = None,
     stratify : Optional[Tensor] = None,
     drop_last : bool = False,
 ):
-    length = len(dataset)
+    length = indices.shape[0]
     subsample_size = subsample_size if isinstance(subsample_size, int) else math.floor(length*subsample_size)
 
     train_size = train_size if isinstance(train_size, int) else math.floor(subsample_size*train_size)
@@ -235,16 +236,15 @@ def train_test_multi_subset_samplers(
         raise ValueError("training set size must be smaller than subset size.")
     valid_size = subsample_size - train_size
         
-    all_indices = torch.arange(length)
-    seed = int(torch.empty((), dtype=torch.long).item()) % 2**32 if seed is None else seed
+    seed = int(torch.empty((), dtype=torch.long).item()) % 2**32 if seed is None and generators is not None else seed
 
     train_subset_index_list = []
     valid_subset_index_list = []
 
     for icopy in range(num_replicas):
-        g = Generator().manual_seed(seed + icopy)
+        g = Generator().manual_seed(seed + icopy) if generators is None else generators[icopy]
         subset_index = undersample(
-            all_indices,
+            indices,
             size=subsample_size,
             stratify=stratify,
             generator=g,

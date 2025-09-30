@@ -1,6 +1,5 @@
 from functools import partial
 from copy import deepcopy
-from re import X
 
 import torch
 from torch.nn.functional import binary_cross_entropy_with_logits
@@ -109,8 +108,6 @@ if __name__ == "__main__":
         buffers.requires_grad_(False)
  
     base_model = base_model.to("meta")
-    criterion = partial(loss_fn, base_model)
-
     dataset = TabularDataset.load_memmap("det_lvl_ds")
 
     print("Subsampling and splitting dataset into train and valid batches ...")
@@ -130,7 +127,6 @@ if __name__ == "__main__":
     
     valid_loader = get_stacked_batch_loader(dataset, valid_sampler)
 
-    criterion = partial(loss_fn, base_model)
 
     nepochs = 50
 

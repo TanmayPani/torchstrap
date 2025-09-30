@@ -5,16 +5,16 @@ from collections.abc import Iterator, Mapping, Sequence
 
 import torch
 
-from torch import Tensor, device
+from torch import Tensor, device, no_grad
 
 from torch.utils import _pytree
 
-from torch.func import functional_call, stack_module_state
+from torch.func import functional_call
 from torch.func import vmap, grad_and_value
 
 from torch.nn import Identity, Parameter
 from torch.nn import ParameterDict
-from torch.nn import Module, ModuleList
+from torch.nn import Module
 from torch.nn.utils import skip_init
 
 import torch.nn.functional as F
@@ -23,40 +23,34 @@ from churten.optimizer import GradientTransformations
 from churten.utils import params_for
 from churten.nn.archs import TensorCallable 
 
-from churten.model import BaseModel
-
-class BaggingEnsemble(Module):
+class BaseModel(Module):
     def __init__(
         self,
-        model_cls : type[Module] | Module,
+        model : Module,
         criterion : TensorCallable,
         optimizer : GradientTransformations,
-        *args,
-        num_replicas : int = 1,
         device : str | torch.device = "cpu",
         dtype : torch.dtype = torch.float32,
-        model_init_fn : Optional[Callable[[Module], None]] = None,
-        **kwargs,
+        params : Optional[dict[str, Tensor]] = None,
+        buffers : Optional[dict[str, Tensor]] = None,
     ):
         super().__init__()
+
         self.device = device
-        self.dtype = dtype
+        
+        self._params_dict = {
+            key : param.detach().to(device=self.device, dtype=dtype).requires_grad_(False) for key, param in model.named_parameters()
+        } if params is None else params
 
-        if isinstance(model_cls, Module):
-            model = model_cls
-        elif model_init_fn is not None:
-            model = skip_init(model_cls, *args, device = self.device, **kwargs)
-            model.apply(model_init_fn)
-        else:
-            model = model_cls(*args, **kwargs)
-
-        self.models = ModuleList([deepcopy(model).to(device=self.device, dtype=self.dtype).requires_grad_(False) for _ in range(num_replicas)])
-        self._params_dict, self._buffers_dict = stack_module_state(self.models)
-        self.model = self.models[0].to(device="meta")
-
+        self._buffers_dict = {
+            key : buffer.detach().to(device=self.device, dtype=dtype).requires_grad_(False) for key, buffer in model.named_buffers()
+        } if buffers is None else buffers
+        
+        self.model = model.to(device="meta").requires_grad_(False)
         self.criterion = criterion
+
         self.optimizer = optimizer
-        self.optimizer.init(self._params_dict)
+        optimizer.state.init(self._params_dict)
 
         self._compiled_eval = None
         self._compiled_eval_wgrad = None
@@ -65,18 +59,65 @@ class BaggingEnsemble(Module):
     def params_and_buffers_dicts(self):
         return (self._params_dict, self._buffers_dict)
 
+    #becomes the _call_impl method
+    def forward(
+        self, 
+        params : dict[str, Tensor], 
+        buffers : dict[str, Tensor], 
+        *args, 
+        non_linearity : TensorCallable = torch.nn.Identity(),
+        **kwargs,
+    ):
+        return non_linearity(
+            functional_call(
+                self.model, 
+                (params, buffers), 
+                args, kwargs,
+            )
+        )
+
+    
+class Model(BaseModel):
+    def __init__(
+        self,
+        model_cls : type[Module] | Module,
+        criterion : TensorCallable,
+        optimizer : GradientTransformations,
+        *args,
+        device : str | torch.device = "cpu",
+        dtype : torch.dtype = torch.float32,
+        model_init_fn : Optional[Callable[[Module], None]] = None,
+        **kwargs,
+    ):
+        if isinstance(model_cls, Module):
+            model = model_cls
+        elif model_init_fn is not None:
+            model = skip_init(model_cls, *args, **kwargs)
+            model.apply(model_init_fn)
+        else:
+            model = model_cls(*args, **kwargs)
+
+        super().__init__(
+            model,
+            criterion,
+            optimizer,
+            device=device,
+            dtype=dtype,
+        )
+
+
     def infer(
         self,
         iterator : Iterator[Any],
-        concat_dim = 1,
+        concat_dim = 0,
         #non_linearity = Identity(),
         **kwargs,
     ):
         return torch.cat([
-            vmap(self.__call__)(
+            self.__call__(
                 self._params_dict,
                 self._buffers_dict,
-                input.to(device=self.device),
+                input,
                 **kwargs,
             ) for input, _, _ in iterator
         ], dim=concat_dim)
@@ -90,16 +131,13 @@ class BaggingEnsemble(Module):
     ):
         for iepoch in range(num_epochs):
             self.train(True)
-            #print(self._params_dict['layers.1.layeritos.layer.weight'])
             train_losses = self.epoch_step(train_iterator, **kwargs)
-            #print(self._params_dict['layers.1.layeritos.layer.weight'])
-            #print(self.optimizer.state.params['layers.1.layeritos.layer.weight'])
             
             self.train(False)
-            with torch.inference_mode():
+            with torch.no_grad():
                 valid_losses = self.epoch_step(valid_iterator, **kwargs)
 
-            print("Train loss: ", train_losses.mean(dim=0), ", Valid_losses: ", valid_losses.mean(dim=0))
+            print("Train loss: ", train_losses.mean(), ", Valid_losses: ", valid_losses)
 
 
     def epoch_step(
@@ -116,9 +154,9 @@ class BaggingEnsemble(Module):
                 **kwargs,
             )
 
-            batch_losses.append(batch_loss)
+            print(batch_loss, batch_grads)
 
-            #print(batch_grads)
+            batch_losses.append(batch_loss)
 
         return torch.stack(batch_losses)
 
@@ -138,43 +176,22 @@ class BaggingEnsemble(Module):
         if self._compiled_eval_wgrad is not None:
             return self._compiled_eval_wgrad(*args, **kwargs)
         else:
-            return self.vmapped_forward_eval_wgrad(*args, **kwargs)
+            return self.forward_eval_wgrad(*args, **kwargs)
 
     def evaluate(self, *args, **kwargs):
         if self._compiled_eval is not None:
             return self._compiled_eval(*args, **kwargs)
         else:
-            return self.vmapped_forward_eval(*args, **kwargs)
+            return self.forward_eval(*args, **kwargs)
 
     def compile(self, *args, **kwargs):
         super().compile(*args, **kwargs)
         self._compiled_eval = torch.compile(
-            self.vmapped_forward_eval, *args, **kwargs
+            self.forward_eval, *args, **kwargs
         )
         self._compiled_eval_wgrad = torch.compile(
-            self.vmapped_forward_eval_wgrad, *args, **kwargs
+            self.forward_eval_wgrad, *args, **kwargs
         )
-
-    def vmapped_forward_eval_wgrad(
-        self, 
-        *args, 
-        argnums = 0, 
-        has_aux = False, 
-        **kwargs,
-    ):
-        return vmap( 
-            grad_and_value(
-                self.forward_eval, 
-                argnums = argnums, 
-                has_aux = has_aux,
-            )
-        )(*args, **kwargs)
-
-    def vmapped_forward_eval(
-        self, *args, **kwargs,
-    ):
-        return vmap(self.forward_eval)(*args, **kwargs)
-
 
     def forward_eval_wgrad(
         self, 
@@ -202,31 +219,13 @@ class BaggingEnsemble(Module):
             buffers, 
             *args[:-1], 
             **model_call_kwargs,
-        ).squeeze_()
-        return self.criterion(prediction, args[-1], **kwargs)
-
-    #becomes the _call_impl method
-    def forward(
-        self, 
-        params : dict[str, Tensor], 
-        buffers : dict[str, Tensor], 
-        *args, 
-        non_linearity : TensorCallable = torch.nn.Identity(),
-        **kwargs,
-    ):
-        return non_linearity(
-            functional_call(
-                self.model, 
-                (params, buffers), 
-                args, kwargs,
-            )
         )
-
+        return self.criterion(prediction, args[-1], **kwargs)
 
 from churten.optimizer import FuncAdam
 if __name__ == "__main__": 
     torch.manual_seed(0)
-   
+    
     tmodel = torch.nn.Sequential(
             torch.nn.Linear(10, 20),
             torch.nn.ReLU(),
@@ -235,15 +234,12 @@ if __name__ == "__main__":
 
     device = "cuda"
 
-    num_replicas = 3 
-
     optim = FuncAdam(lr = 1e-3, device=device)
-    model = BaggingEnsemble(
+    model = Model(
         tmodel,
         F.binary_cross_entropy_with_logits,
         optim,
-        num_replicas=num_replicas,
-        device=device,
+        device=device
     )
 
     model.compile()
@@ -253,16 +249,18 @@ if __name__ == "__main__":
     print("model:" , model)
     print("model state dict:" , model.model.state_dict())
 
-    input = torch.ones(num_replicas, 5, 10, device=device)
-    target = torch.ones(num_replicas, 5, 1, device=device)
-    weight = torch.ones(num_replicas, 5, 1, device=device)
+    input = torch.ones(5, 10, device=device)
+    target = torch.ones(5, 1, device=device)
+    weight = torch.ones(5, 1, device=device)
 
     it = [(input, target, weight)]
     
-    step_out = model.fit(it, it)
+    
+    step_out = model.fit(
+        it, it
+    )
 
-
-
+    print("from step:", step_out)
 
 
 

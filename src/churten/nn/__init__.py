@@ -1,7 +1,7 @@
-from . import nn 
+from . import archs 
 from . import transform
 
 __all__ = [
-    "nn",
+    "archs",
     "transform"
 ]
