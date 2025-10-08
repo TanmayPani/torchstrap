@@ -1,137 +1,255 @@
+import os
 from copy import deepcopy
-from typing import Callable, Union, Protocol, Optional, Any
-from typing import runtime_checkable
-from collections.abc import Iterator, Mapping, Sequence
+from typing import Callable, Optional, Any
+from collections import OrderedDict
+from collections.abc import Iterator
 
 import torch
-
-from torch import Tensor, device
-
-from torch.utils import _pytree
+from torch import Tensor
 
 from torch.func import functional_call, stack_module_state
 from torch.func import vmap, grad_and_value
 
-from torch.nn import Identity, Parameter
-from torch.nn import ParameterDict
-from torch.nn import Module, ModuleList
+from torch.nn import Module, ModuleList, Identity
 from torch.nn.utils import skip_init
-
 import torch.nn.functional as F
+
+from tensordict import TensorDict
 
 from churten.optimizer import GradientTransformations
 from churten.utils import params_for
-from churten.nn.archs import TensorCallable 
+from churten.nn.archs import TensorCallable
+from churten.callbacks import PrintLog
 
-from churten.model import BaseModel
+from churten.history import History
 
-class BaggingEnsemble(Module):
+def replicate_module(
+    module : Module,
+    num_replicas : int = 1,
+    *,
+    device : str | torch.device = "cpu", 
+    dtype : torch.dtype = torch.float32,
+    requires_grad : bool = False,
+):
+    return ModuleList(deepcopy(module) \
+                .to(dtype=dtype, device=device) \
+                .requires_grad_(requires_grad) 
+            for _ in range(num_replicas)
+        )
+
+class Ensemble(Module):
     def __init__(
         self,
-        model_cls : type[Module] | Module,
+        modeller : Module | Callable[..., Module],
         criterion : TensorCallable,
-        optimizer : GradientTransformations,
-        *args,
         num_replicas : int = 1,
+        *,
+        model_init_args : tuple = (),
+        model_init_kwargs : dict = {},
+        model_init_randomness : str = "same",
         device : str | torch.device = "cpu",
         dtype : torch.dtype = torch.float32,
-        model_init_fn : Optional[Callable[[Module], None]] = None,
         **kwargs,
     ):
         super().__init__()
-        self.device = device
+
+        self.device = torch.device(device)
         self.dtype = dtype
+        self.num_replicas = num_replicas
 
-        if isinstance(model_cls, Module):
-            model = model_cls
-        elif model_init_fn is not None:
-            model = skip_init(model_cls, *args, device = self.device, **kwargs)
-            model.apply(model_init_fn)
+        if isinstance(modeller, Module):
+            _single_model = modeller
+            _models = replicate_module(
+                _single_model, self.num_replicas, device=self.device, dtype=self.dtype,
+            )
+        elif model_init_randomness == "same":
+            _single_model = modeller(*model_init_args, **model_init_kwargs)
+            _models = replicate_module(
+                _single_model, self.num_replicas, device=self.device, dtype=self.dtype,
+            )
         else:
-            model = model_cls(*args, **kwargs)
+            _models = ModuleList(
+                modeller(
+                    *model_init_args, 
+                    dtype=self.dtype, 
+                    device=self.device, 
+                    **model_init_kwargs
+                ).requires_grad_(False) 
+                for _ in range(self.num_replicas)
+            )
+            _single_model = _models[0]
 
-        self.models = ModuleList([deepcopy(model).to(device=self.device, dtype=self.dtype).requires_grad_(False) for _ in range(num_replicas)])
-        self._params_dict, self._buffers_dict = stack_module_state(self.models)
-        self.model = self.models[0].to(device="meta")
+
+        self._params_dict, self._buffers_dict = stack_module_state(_models)
+        self._base_model = _single_model.to(device="meta")
 
         self.criterion = criterion
-        self.optimizer = optimizer
-        self.optimizer.init(self._params_dict)
-
+        
+        
         self._compiled_eval = None
         self._compiled_eval_wgrad = None
+
+        self.num_iterations = 0
+        self.last_checkpoint = ""
 
     @property
     def params_and_buffers_dicts(self):
         return (self._params_dict, self._buffers_dict)
 
-    def infer(
+    def save_checkpoint(
+        self, 
+        path : str,
+    ):
+        os.makedirs(path, exist_ok=True)
+
+        self.last_checkpoint = path
+        TensorDict(self._params_dict, device=self.device).memmap_(f"{path}/params")
+        TensorDict(self._buffers_dict, device=self.device).memmap_(f"{path}/buffers")
+
+    def load_checkpoint(
+        self, 
+        path : Optional[str] = None, 
+        **kwargs,
+    ):
+        path = path or self.last_checkpoint
+        if path == "":
+            raise ValueError("No checkpoints have been saved so please pass a path")                                                                                     
+        
+        self._params_dict = TensorDict.load_memmap(
+            f"{path}/params", device=self.device,
+        ).to_dict()
+
+        self._buffers_dict = TensorDict.load_memmap(
+            f"{path}/buffers", device=self.device,
+        ).to_dict()
+
+
+    def predict(
         self,
         iterator : Iterator[Any],
         concat_dim = 1,
-        #non_linearity = Identity(),
         **kwargs,
     ):
-        return torch.cat([
-            vmap(self.__call__)(
+        #self.to_device(self.device)
+        with torch.inference_mode():
+            return torch.cat([
+                vmap(self.__call__)(
+                    self._params_dict,
+                    self._buffers_dict,
+                    input.to(
+                        device = self.device,
+                        dtype = self.dtype,
+                    ),
+                    **kwargs,
+                ).detach().cpu() for input, _, _ in iterator
+            ], dim=concat_dim)
+
+    def infer(
+        self,
+        *args,
+        **kwargs,
+    ):
+        with torch.inference_mode():
+            return vmap(self.__call__)(
                 self._params_dict,
                 self._buffers_dict,
-                input.to(device=self.device),
+                *args,
                 **kwargs,
-            ) for input, _, _ in iterator
-        ], dim=concat_dim)
+            ).detach().cpu()
 
     def fit(
         self,
-        train_iterator,
-        valid_iterator,
-        num_epochs = 1,
+        optimizer : GradientTransformations,
+        train_iterator : Iterator,
+        valid_iterator : Iterator,
+        num_epochs : int = 1,
+        prefix : str = "model",
         **kwargs,
     ):
+        if self.num_iterations > 0:
+            self.load_checkpoint()
+            
+        dir = f"{prefix}/iteration_{self.num_iterations}"
+
+        history = History(
+            num_replicas=self.num_replicas, 
+            path = f"{dir}/history",
+        )
+        print_log = PrintLog().initialize()
+
+        optimizer.init(self._params_dict)
+
         for iepoch in range(num_epochs):
             self.train(True)
-            #print(self._params_dict['layers.1.layeritos.layer.weight'])
-            train_losses = self.epoch_step(train_iterator, **kwargs)
-            #print(self._params_dict['layers.1.layeritos.layer.weight'])
-            #print(self.optimizer.state.params['layers.1.layeritos.layer.weight'])
+            train_losses = self.fit_step(optimizer, train_iterator, **kwargs)
             
             self.train(False)
             with torch.inference_mode():
-                valid_losses = self.epoch_step(valid_iterator, **kwargs)
+                valid_losses = self.fit_step(optimizer, valid_iterator, **kwargs)
 
-            print("Train loss: ", train_losses.mean(dim=0), ", Valid_losses: ", valid_losses.mean(dim=0))
+            history.append(
+                train_loss = train_losses.cpu(),
+                valid_loss = valid_losses.cpu(),
+            )
 
+            del train_losses
+            del valid_losses
+            
+            print_log.on_epoch_end(history)
 
-    def epoch_step(
+        self.save_checkpoint(dir)
+        self.num_iterations += 1
+
+        history.flush()
+
+        return history
+
+    def to_device(self, device):
+        self._params_dict = TensorDict(self._params_dict, device=device).to_dict()
+        self._buffers_dict = TensorDict(self._buffers_dict, device=device).to_dict()
+
+    def fit_step(
         self,
+        optimizer : GradientTransformations,
         iterator : Iterator[Any],
         **kwargs,
     ):
         batch_losses = []
         for input, target, sample_weight in iterator:
             batch_loss, batch_grads = self.step(
+                optimizer,
                 input.to(device=self.device),
                 target.to(device=self.device),
-                weight = sample_weight.to(device=self.device),
+                weight = sample_weight.to(device=self.device) if sample_weight is not None else None,
                 **kwargs,
             )
 
             batch_losses.append(batch_loss)
 
-            #print(batch_grads)
-
-        return torch.stack(batch_losses)
+        return torch.stack(batch_losses, dim=1)
 
 
-    def step(self, *args, **kwargs):
+    def step(
+        self,
+        optimizer : GradientTransformations,
+        *args, **kwargs,
+    ):
         if self.training:
             grads, loss = self.evaluate_and_gradient(
-                self._params_dict, self._buffers_dict, *args, **kwargs
+                self._params_dict, 
+                self._buffers_dict, 
+                *args, 
+                **kwargs
             )
-            self.optimizer.apply_gradients(grads)
+            optimizer.apply_gradients(grads)
             return loss, grads
         else:
-            loss = self.evaluate(self._params_dict, self._buffers_dict, *args, **kwargs)
+            loss = self.evaluate(
+                self._params_dict, 
+                self._buffers_dict, 
+                *args, 
+                **kwargs
+            )
             return loss, None
 
     def evaluate_and_gradient(self, *args, **kwargs):
@@ -177,11 +295,7 @@ class BaggingEnsemble(Module):
 
 
     def forward_eval_wgrad(
-        self, 
-        *args, 
-        argnums = 0, 
-        has_aux = False, 
-        **kwargs,
+        self, *args, argnums = 0, has_aux = False, **kwargs,
     ):
         return grad_and_value(
             self.forward_eval, 
@@ -202,7 +316,7 @@ class BaggingEnsemble(Module):
             buffers, 
             *args[:-1], 
             **model_call_kwargs,
-        ).squeeze_()
+        )
         return self.criterion(prediction, args[-1], **kwargs)
 
     #becomes the _call_impl method
@@ -211,58 +325,13 @@ class BaggingEnsemble(Module):
         params : dict[str, Tensor], 
         buffers : dict[str, Tensor], 
         *args, 
-        non_linearity : TensorCallable = torch.nn.Identity(),
+        non_linearity : TensorCallable = Identity(),
         **kwargs,
     ):
         return non_linearity(
             functional_call(
-                self.model, 
+                self._base_model, 
                 (params, buffers), 
                 args, kwargs,
             )
         )
-
-
-from churten.optimizer import FuncAdam
-if __name__ == "__main__": 
-    torch.manual_seed(0)
-   
-    tmodel = torch.nn.Sequential(
-            torch.nn.Linear(10, 20),
-            torch.nn.ReLU(),
-            torch.nn.Linear(20, 1),
-    )
-
-    device = "cuda"
-
-    num_replicas = 3 
-
-    optim = FuncAdam(lr = 1e-3, device=device)
-    model = BaggingEnsemble(
-        tmodel,
-        F.binary_cross_entropy_with_logits,
-        optim,
-        num_replicas=num_replicas,
-        device=device,
-    )
-
-    model.compile()
-
-    params, buffers = model.params_and_buffers_dicts
-
-    print("model:" , model)
-    print("model state dict:" , model.model.state_dict())
-
-    input = torch.ones(num_replicas, 5, 10, device=device)
-    target = torch.ones(num_replicas, 5, 1, device=device)
-    weight = torch.ones(num_replicas, 5, 1, device=device)
-
-    it = [(input, target, weight)]
-    
-    step_out = model.fit(it, it)
-
-
-
-
-
-

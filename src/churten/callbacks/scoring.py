@@ -10,9 +10,10 @@ import sklearn
 from sklearn.metrics import make_scorer, check_scoring
 from sklearn.metrics._scorer import _BaseScorer
 
-from sklearn_wrappers.torch.callbacks import Callback
-from sklearn_wrappers.torch.utils import to_numpy
-from sklearn_wrappers.torch.utils import to_device
+from churten.utils import to_numpy
+from churten.utils import to_device
+
+from .callbacks import Callback
 
 __all__ = ['BatchScoring', 'EpochScoring', 'PassThroughScoring']
 

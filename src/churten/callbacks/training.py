@@ -10,9 +10,9 @@ from copy import deepcopy
 import numpy as np
 
 from .callbacks import Callback
-from sklearn_wrappers.torch.utils import _check_f_arguments
-from sklearn_wrappers.torch.utils import noop
-from sklearn_wrappers.torch.utils import open_file_like
+from churten.utils import _check_f_arguments
+from churten.utils import noop
+from churten.utils import open_file_like
 
 class Checkpoint(Callback):
     """Save the model during training if the given metric improved.

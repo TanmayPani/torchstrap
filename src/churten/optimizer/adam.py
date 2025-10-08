@@ -108,7 +108,7 @@ class AdamOptState(OptimState):
         return self._update_args
 
 
-class FuncAdam(GradientTransformations):
+class Adam(GradientTransformations):
     def __init__(
         self, 
         lr = 1e-3,
@@ -151,8 +151,6 @@ class FuncAdam(GradientTransformations):
         }
         super().__init__(AdamOptState(**optim_state) ,device=device, **kwargs)
 
-
-    @classmethod
-    def step(cls, *args, **kwargs):
+    def step(self, *args, **kwargs):
         adam(*args, **kwargs)
 

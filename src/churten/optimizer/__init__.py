@@ -4,5 +4,5 @@ from .adam import *
 __all__ = [  
             "optimizer_setter", 
             "GradientTransformations", "OptimState",
-            "FuncAdam", "AdamOptState",
+            "Adam", "AdamOptState",
 ]

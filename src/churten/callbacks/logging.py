@@ -6,11 +6,12 @@ from numbers import Number
 from itertools import cycle
 from pathlib import Path
 
+import torch
 import numpy as np
 import tqdm
 from tabulate import tabulate
 
-from sklearn_wrappers.torch.utils import Ansi
+from churten.utils import Ansi
 from .callbacks import Callback
 
 def filter_log_keys(keys, keys_ignored=None):
@@ -66,7 +67,7 @@ class PrintLog(Callback):
         if isinstance(keys_ignored, str):
             keys_ignored = [keys_ignored]
         self.keys_ignored_ = set(keys_ignored or [])
-        self.keys_ignored_.add('batches')
+        #self.keys_ignored_.add('batches')
         return self
 
     def format_row(self, row, key, color):
@@ -74,23 +75,31 @@ class PrintLog(Callback):
         points and color if applicable).
 
         """
-        value = row[key]
+        _row = row[key]
 
-        if isinstance(value, bool) or value is None:
-            return '+' if value else ''
+        _values = _row.mean(dim=0)
+        _value_err, _value = torch.std_mean(_values, dim=0)
 
-        if not isinstance(value, Number):
-            return value
+        value = _value.item()
+        value_err = _value_err.item()
 
+        return f"{value: .4f} +/- {value_err: .4f}"
+
+#        if isinstance(value, bool) or value is None:
+#            return '+' if value else ''
+#
+#        if not isinstance(value, Number):
+#            return value
+#
         # determine if integer value
-        is_integer = float(value).is_integer()
-        template = '{}' if is_integer else '{:' + self.floatfmt + '}'
+#        is_integer = float(value).is_integer()
+#        template = '{}' if is_integer else '{:' + self.floatfmt + '}'
 
-        # if numeric, there could be a 'best' key
-        key_best = key + '_best'
-        if (key_best in row) and row[key_best]:
-            template = color + template + Ansi.ENDC.value
-        return template.format(value)
+#        # if numeric, there could be a 'best' key
+#        key_best = key + '_best'
+#        if (key_best in row) and row[key_best]:
+#            template = color + template + Ansi.ENDC.value
+#        return template.format(value)
 
     def _sorted_keys(self, keys):
         """Sort keys, dropping the ones that should be ignored.
@@ -98,8 +107,8 @@ class PrintLog(Callback):
         sorted_keys = []
 
         # make sure 'epoch' comes first
-        if ('epoch' in keys) and ('epoch' not in self.keys_ignored_):
-            sorted_keys.append('epoch')
+        #if ('epoch' in keys) and ('epoch' not in self.keys_ignored_):
+        #    sorted_keys.append('epoch')
 
         # ignore keys like *_best or event_*
         for key in filter_log_keys(sorted(keys), keys_ignored=self.keys_ignored_):
@@ -107,9 +116,9 @@ class PrintLog(Callback):
                 sorted_keys.append(key)
 
         # add event_* keys
-        for key in sorted(keys):
-            if key.startswith('event_') and (key not in self.keys_ignored_):
-                sorted_keys.append(key)
+        #for key in sorted(keys):
+        #    if key.startswith('event_') and (key not in self.keys_ignored_):
+        #        sorted_keys.append(key)
 
         # make sure 'dur' comes last
         if ('dur' in keys) and ('dur' not in self.keys_ignored_):
@@ -121,8 +130,8 @@ class PrintLog(Callback):
         colors = cycle([color.value for color in Ansi if color != color.ENDC])
         for key, color in zip(self._sorted_keys(row.keys()), colors):
             formatted = self.format_row(row, key, color=color)
-            if key.startswith('event_'):
-                key = key[6:]
+            #if key.startswith('event_'):
+            #    key = key[6:]
             yield key, formatted
 
     def table(self, row):
@@ -145,9 +154,9 @@ class PrintLog(Callback):
             self.sink(text)
 
     # pylint: disable=unused-argument
-    def on_epoch_end(self, net, **kwargs):
+    def on_epoch_end(self, net, verbose=True,**kwargs):
         data = net.history[-1]
-        verbose = net.verbose
+        #verbose = net.verbose
         tabulated = self.table(data)
 
         if self.first_iteration_:

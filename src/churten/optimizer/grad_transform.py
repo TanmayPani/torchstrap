@@ -3,6 +3,8 @@ import os
 from typing import Any
 from typing import Optional
 
+from collections.abc import Sequence
+
 from copy import deepcopy
 from dataclasses import field
 
@@ -26,10 +28,13 @@ class OptimState(TensorClass["nocast"]):
         self, 
         _params : dict[str, Tensor] | TensorDict
     ):
-        self.params = TensorDict(
-            _params, 
-            batch_size=self.batch_size,
-        )
+        if isinstance(_params, TensorDict):
+            self.params = _params
+        else:
+            self.params = TensorDict(
+                _params, 
+                batch_size=self.batch_size,
+            )
         #self.device = self.params.device
         self.grads = deepcopy(self.params).zero_()
         #self.lr = self.lr.to(dtype=torch.float32, device=self.device)
@@ -56,10 +61,11 @@ class GradientTransformations:
         device : str | torch.device = "cpu",
         #dtype : torch.dtype = torch.float32,
     ):
-        self._state = state.to(
-            device = device, #dtype = dtype, 
-        )
-        self.num_stacked_states = self._state.numel()
+        self.device = device
+        self.state = state #dtype = dtype)
+        self.num_stacked_states = self.state.numel()
+
+        self.mask = [True]*self.num_stacked_states
    
     @property
     def state(self):
@@ -67,7 +73,23 @@ class GradientTransformations:
 
     @state.setter
     def state(self, val):
-        self._state = val 
+        self._state = val.to(device=self.device)
+
+    @property
+    def mask(self):
+        return self._mask
+
+    @mask.setter
+    def mask(self, val):
+        self._mask = torch.as_tensor(
+            val, 
+            dtype=torch.bool, 
+            #requires_grad = False,
+        ).requires_grad_(False)
+
+        assert self._mask.shape == self.state.batch_size
+        self.num_active_states = self.state[self._mask].numel()
+        #print(self.num_active_states)
 
     def init(self, params : dict[str, Tensor]):
         params_td = TensorDict(params, batch_size=self._state.batch_size)
@@ -78,19 +100,18 @@ class GradientTransformations:
         self,
         grads : dict[str, Tensor],
     ):
-        self._state.grads.update_(grads, keys_to_update=list(grads.keys()))
+        self.state.grads.update_(grads, keys_to_update=list(grads.keys()))
         
-        if self._state.batch_dims == 0:
-            args, kwargs = self._state.update_args
+        if self.state.batch_dims == 0 :
+            args, kwargs = self.state.update_args
             self.step(*args, **kwargs)
         else:
             for istate in range(self.num_stacked_states):
-                args, kwargs = self._state[istate].update_args
+                args, kwargs = self.state[istate].update_args
                 self.step(*args, **kwargs)
     
-    @classmethod
     def step(
-        cls, 
+        self, 
         *args : Any,
         **kwargs : Any,
     ):
