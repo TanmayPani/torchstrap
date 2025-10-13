@@ -106,7 +106,10 @@ class MLP(Module):
                  layer_sizes=[10, 1], 
                  output_activation : Optional[ModuleLike] = None,
                  input_transform : Optional[ModuleLike]=None,
-                 **kwargs):
+                 device="cpu",
+                 dtype=torch.float32,
+                 **kwargs
+    ):
         
         super().__init__()
         
@@ -143,7 +146,9 @@ class MLP(Module):
             self.layers.append(initialize_layer(input_transform, *input_transform_args, **input_transform_kwargs))
             
         for ilayer, (input_size, output_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
-            self.layers.append(Layer(layers[ilayer], input_size, output_size, activation=activations[ilayer], **(list_kwargs[ilayer])))    
+            self.layers.append(Layer(layers[ilayer], input_size, output_size, activation=activations[ilayer], **(list_kwargs[ilayer])))
+
+        self.to(device=device, dtype=dtype)
 
     def forward(self, x, training=False):
         self.train(mode=training)

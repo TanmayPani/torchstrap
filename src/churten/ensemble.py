@@ -41,9 +41,9 @@ class Ensemble(Module):
     def __init__(
         self,
         modeller : Module | Callable[..., Module],
+        *,
         criterion : TensorCallable,
         num_replicas : int = 1,
-        *,
         model_init_args : tuple = (),
         model_init_kwargs : dict = {},
         model_init_randomness : str = "same",
@@ -67,7 +67,7 @@ class Ensemble(Module):
             _models = replicate_module(
                 _single_model, self.num_replicas, device=self.device, dtype=self.dtype,
             )
-        else:
+        elif model_init_randomness == "different":
             _models = ModuleList(
                 modeller(
                     *model_init_args, 
@@ -78,10 +78,18 @@ class Ensemble(Module):
                 for _ in range(self.num_replicas)
             )
             _single_model = _models[0]
-
+    
+        else:
+            raise ValueError(
+                "``modeller`` positional argument given Callable that is NOT torch.nn.Module."
+                f"But ``model_init_randomness`` keyword argument got {model_init_randomness} (value other than [``same``, ``different``])."
+                "Either provide an initialized torch.nn.Module or pass ``model_init_randomness`` kwarg properly."
+            )
 
         self._params_dict, self._buffers_dict = stack_module_state(_models)
         self._base_model = _single_model.to(device="meta")
+
+        #print(self._modules)
 
         self.criterion = criterion
         
@@ -93,8 +101,12 @@ class Ensemble(Module):
         self.last_checkpoint = ""
 
     @property
-    def params_and_buffers_dicts(self):
-        return (self._params_dict, self._buffers_dict)
+    def params_dict(self):
+        return self._params_dict
+
+    @property
+    def buffers_dict(self):
+        return self._buffers_dict
 
     def save_checkpoint(
         self, 
@@ -128,12 +140,22 @@ class Ensemble(Module):
         self,
         iterator : Iterator[Any],
         concat_dim = 1,
+        in_dims=0, 
+        out_dims=0, 
+        randomness="error", 
+        chunk_size=None, 
         **kwargs,
     ):
         #self.to_device(self.device)
         with torch.inference_mode():
             return torch.cat([
-                vmap(self.__call__)(
+                vmap(
+                    self.__call__,
+                    in_dims=in_dims,
+                    out_dims=out_dims,
+                    randomness=randomness,
+                    chunk_size=chunk_size,
+                )(
                     self._params_dict,
                     self._buffers_dict,
                     input.to(
@@ -147,10 +169,20 @@ class Ensemble(Module):
     def infer(
         self,
         *args,
+        in_dims=0, 
+        out_dims=0, 
+        randomness="error", 
+        chunk_size=None, 
         **kwargs,
     ):
         with torch.inference_mode():
-            return vmap(self.__call__)(
+            return vmap(
+                self.__call__,
+                in_dims=in_dims,
+                out_dims=out_dims,
+                randomness=randomness,
+                chunk_size=chunk_size,
+            )(
                 self._params_dict,
                 self._buffers_dict,
                 *args,
@@ -163,13 +195,13 @@ class Ensemble(Module):
         train_iterator : Iterator,
         valid_iterator : Iterator,
         num_epochs : int = 1,
-        prefix : str = "model",
+        #prefix : str = "model",
         **kwargs,
     ):
-        if self.num_iterations > 0:
-            self.load_checkpoint()
+        #if self.num_iterations > 0:
+        #    self.load_checkpoint()
             
-        dir = f"{prefix}/iteration_{self.num_iterations}"
+        #dir = f"{prefix}/iteration_{self.num_iterations}"
 
         history = History(
             num_replicas=self.num_replicas, 
@@ -177,14 +209,14 @@ class Ensemble(Module):
         )
         print_log = PrintLog().initialize()
 
-        optimizer.init(self._params_dict)
+        #optimizer.init(self._params_dict)
 
         for iepoch in range(num_epochs):
             self.train(True)
             train_losses = self.fit_step(optimizer, train_iterator, **kwargs)
             
             self.train(False)
-            with torch.inference_mode():
+            with torch.no_grad():
                 valid_losses = self.fit_step(optimizer, valid_iterator, **kwargs)
 
             history.append(
@@ -192,12 +224,11 @@ class Ensemble(Module):
                 valid_loss = valid_losses.cpu(),
             )
 
-            del train_losses
-            del valid_losses
-            
             print_log.on_epoch_end(history)
 
-        self.save_checkpoint(dir)
+        #self.to_device(device="cpu")
+        #self.save_checkpoint(dir)
+
         self.num_iterations += 1
 
         history.flush()
@@ -207,6 +238,11 @@ class Ensemble(Module):
     def to_device(self, device):
         self._params_dict = TensorDict(self._params_dict, device=device).to_dict()
         self._buffers_dict = TensorDict(self._buffers_dict, device=device).to_dict()
+    
+    def train(self, mode : bool = True):
+        super().train(mode)
+        self._base_model.train(mode)
+        return self
 
     def fit_step(
         self,
@@ -216,7 +252,7 @@ class Ensemble(Module):
     ):
         batch_losses = []
         for input, target, sample_weight in iterator:
-            batch_loss, batch_grads = self.step(
+            batch_loss = self.step(
                 optimizer,
                 input.to(device=self.device),
                 target.to(device=self.device),
@@ -224,7 +260,7 @@ class Ensemble(Module):
                 **kwargs,
             )
 
-            batch_losses.append(batch_loss)
+            batch_losses.append(batch_loss.detach_())
 
         return torch.stack(batch_losses, dim=1)
 
@@ -234,7 +270,9 @@ class Ensemble(Module):
         optimizer : GradientTransformations,
         *args, **kwargs,
     ):
+        self._base_model.train(self.training)
         if self.training:
+            #assert self._base_model.training
             grads, loss = self.evaluate_and_gradient(
                 self._params_dict, 
                 self._buffers_dict, 
@@ -242,15 +280,16 @@ class Ensemble(Module):
                 **kwargs
             )
             optimizer.apply_gradients(grads)
-            return loss, grads
+            return loss
         else:
+            #assert not self._base_model.training
             loss = self.evaluate(
                 self._params_dict, 
                 self._buffers_dict, 
                 *args, 
                 **kwargs
             )
-            return loss, None
+            return loss
 
     def evaluate_and_gradient(self, *args, **kwargs):
         if self._compiled_eval_wgrad is not None:
@@ -275,7 +314,11 @@ class Ensemble(Module):
 
     def vmapped_forward_eval_wgrad(
         self, 
-        *args, 
+        *args,
+        in_dims=0, 
+        out_dims=0, 
+        randomness="error", 
+        chunk_size=None, 
         argnums = 0, 
         has_aux = False, 
         **kwargs,
@@ -285,13 +328,29 @@ class Ensemble(Module):
                 self.forward_eval, 
                 argnums = argnums, 
                 has_aux = has_aux,
-            )
+            ),
+            in_dims=in_dims, 
+            out_dims=out_dims, 
+            randomness=randomness, 
+            chunk_size=chunk_size, 
         )(*args, **kwargs)
 
     def vmapped_forward_eval(
-        self, *args, **kwargs,
+        self, 
+        *args, 
+        in_dims=0, 
+        out_dims=0, 
+        randomness="error", 
+        chunk_size=None, 
+        **kwargs,
     ):
-        return vmap(self.forward_eval)(*args, **kwargs)
+        return vmap(
+            self.forward_eval,
+            in_dims=in_dims, 
+            out_dims=out_dims, 
+            randomness=randomness, 
+            chunk_size=chunk_size, 
+        )(*args, **kwargs)
 
 
     def forward_eval_wgrad(

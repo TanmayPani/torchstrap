@@ -85,7 +85,7 @@ class GradientTransformations:
             val, 
             dtype=torch.bool, 
             #requires_grad = False,
-        ).requires_grad_(False)
+        ).requires_grad_(False).squeeze_()
 
         assert self._mask.shape == self.state.batch_size
         self.num_active_states = self.state[self._mask].numel()
