@@ -5,6 +5,9 @@ from contextlib import suppress
 from numbers import Number
 from itertools import cycle
 from pathlib import Path
+import statistics
+
+from collections.abc import Iterable, Sequence
 
 import torch
 import numpy as np
@@ -37,15 +40,13 @@ class EpochTimer(Callback):
 
         self.epoch_start_time_ = None
 
-    def on_epoch_begin(self, net, **kwargs):
+    def on_epoch_begin(self, state, history, **kwargs):
         self.epoch_start_time_ = time.time()
 
-    def on_epoch_end(self, net, **kwargs):
-        net.history.record('dur', time.time() - (self.epoch_start_time_ or 0))
+    def on_epoch_end(self, state, history, **kwargs):
+        history.append('dur', time.time() - (self.epoch_start_time_ or 0))
 
 class PrintLog(Callback):
-    """Print useful information from the model's history as a table.
-    """
     def __init__(
             self,
             keys_ignored=None,
@@ -67,7 +68,7 @@ class PrintLog(Callback):
         if isinstance(keys_ignored, str):
             keys_ignored = [keys_ignored]
         self.keys_ignored_ = set(keys_ignored or [])
-        #self.keys_ignored_.add('batches')
+        self.keys_ignored_.add('batches')
         return self
 
     def format_row(self, row, key, color):
@@ -75,40 +76,46 @@ class PrintLog(Callback):
         points and color if applicable).
 
         """
-        _row = row[key]
+        value = row[key]
 
-        _values = _row.mean(dim=0)
-        _value_err, _value = torch.std_mean(_values, dim=0)
+        if isinstance(value, bool) or value is None:
+            return '+' if value else ''
 
-        value = _value.item()
-        value_err = _value_err.item()
+        if not isinstance(value, (Number, torch.Tensor)):
+            return value
 
-        return f"{value: .4f} +/- {value_err: .4f}"
-
-#        if isinstance(value, bool) or value is None:
-#            return '+' if value else ''
-#
-#        if not isinstance(value, Number):
-#            return value
-#
         # determine if integer value
-#        is_integer = float(value).is_integer()
-#        template = '{}' if is_integer else '{:' + self.floatfmt + '}'
+        is_integer = float(value).is_integer()
+        template = '{}' if is_integer \
+                                                    else '{:' + self.floatfmt + '}'
 
-#        # if numeric, there could be a 'best' key
-#        key_best = key + '_best'
-#        if (key_best in row) and row[key_best]:
-#            template = color + template + Ansi.ENDC.value
-#        return template.format(value)
+        # if numeric, there could be a 'best' key
+        key_best = key + '_best'
+        if (key_best in row) and row[key_best]:
+            template = color + template + Ansi.ENDC.value
+
+        d_key = "d_"+key
+        if d_key in row:
+            print(key)
+            dvalue = row["d_"+key]
+            return f"{template.format(value)}+/-{template.format(dvalue)}"
+        return template.format(value)
 
     def _sorted_keys(self, keys):
         """Sort keys, dropping the ones that should be ignored.
+
+        The keys that are in ``self.ignored_keys`` or that end on
+        '_best' are dropped. Among the remaining keys:
+          * 'epoch' is put first;
+          * 'dur' is put last;
+          * keys that start with 'event_' are put just before 'dur';
+          * all remaining keys are sorted alphabetically.
         """
         sorted_keys = []
 
         # make sure 'epoch' comes first
-        #if ('epoch' in keys) and ('epoch' not in self.keys_ignored_):
-        #    sorted_keys.append('epoch')
+        if ('epoch' in keys) and ('epoch' not in self.keys_ignored_):
+            sorted_keys.append('epoch')
 
         # ignore keys like *_best or event_*
         for key in filter_log_keys(sorted(keys), keys_ignored=self.keys_ignored_):
@@ -116,9 +123,9 @@ class PrintLog(Callback):
                 sorted_keys.append(key)
 
         # add event_* keys
-        #for key in sorted(keys):
-        #    if key.startswith('event_') and (key not in self.keys_ignored_):
-        #        sorted_keys.append(key)
+        for key in sorted(keys):
+            if key.startswith('event_') and (key not in self.keys_ignored_):
+                sorted_keys.append(key)
 
         # make sure 'dur' comes last
         if ('dur' in keys) and ('dur' not in self.keys_ignored_):
@@ -126,18 +133,53 @@ class PrintLog(Callback):
 
         return sorted_keys
 
-    def _yield_keys_formatted(self, row):
+    def _yield_keys_formatted(self, history):
+        keys = history.keys()
+        keys_list = list(keys)
         colors = cycle([color.value for color in Ansi if color != color.ENDC])
-        for key, color in zip(self._sorted_keys(row.keys()), colors):
+        sorted_keys = self._sorted_keys(keys)
+
+        row = {}
+        for key in sorted_keys:
+            rows = history[key][-1]
+
+            if isinstance(rows, torch.Tensor):
+                row_std, row_mean = torch.std_mean(
+                    rows
+                )
+                row[key] = row_mean.item()
+                f_row_std = row_std.item()
+                if f_row_std > 1e-5: 
+                    row[f"d_{key}"] = f_row_std
+            
+            elif isinstance(rows, Sequence):
+                if isinstance(rows[0], (float, int)):
+                #if isinstance(rows[0], (float, int, torch.Tensor)):
+                    row[key] = statistics.mean(rows)
+                    row_std = statistics.stdev(rows)
+                    if row_std > 1e-5:
+                        row[f"d_{key}"] = row_std
+
+                elif isinstance(rows[0], bool):
+                    row[key] = any(rows)
+                else:
+                    row[key] = rows[0]
+            else:
+                row[key] = rows 
+               
+
+
+
+        for key, color in zip(sorted_keys, colors):
             formatted = self.format_row(row, key, color=color)
-            #if key.startswith('event_'):
-            #    key = key[6:]
+            if key.startswith('event_'):
+                key = key[6:]
             yield key, formatted
 
-    def table(self, row):
+    def table(self, history):
         headers = []
         formatted = []
-        for key, formatted_row in self._yield_keys_formatted(row):
+        for key, formatted_row in self._yield_keys_formatted(history):
             headers.append(key)
             formatted.append(formatted_row)
 
@@ -154,10 +196,9 @@ class PrintLog(Callback):
             self.sink(text)
 
     # pylint: disable=unused-argument
-    def on_epoch_end(self, net, verbose=True,**kwargs):
-        data = net.history[-1]
-        #verbose = net.verbose
-        tabulated = self.table(data)
+    def on_epoch_end(self, state, history, **kwargs):
+        verbose = kwargs.get("verbose", True)
+        tabulated = self.table(history)
 
         if self.first_iteration_:
             header, lines = tabulated.split('\n', 2)[:2]
@@ -168,7 +209,6 @@ class PrintLog(Callback):
         self._sink(tabulated.rsplit('\n', 1)[-1], verbose)
         if self.sink is print:
             sys.stdout.flush()
-
 
 class ProgressBar(Callback):
     """Display a progress bar for each epoch.
@@ -233,11 +273,11 @@ class ProgressBar(Callback):
                 net, dataset_train, dataset_valid
             )
         elif self.batches_per_epoch == 'count':
-            if len(net.history) <= 1:
+            if history.num_epochs <= 1:
                 # No limit is known until the end of the first epoch.
                 batches_per_epoch = None
             else:
-                batches_per_epoch = len(net.history[-2, 'batches'])
+                batches_per_epoch = history["batches"]["ibatch"][-1]
 
         if self._use_notebook():
             self.pbar_ = tqdm.tqdm_notebook(total=batches_per_epoch, leave=False)

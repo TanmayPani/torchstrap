@@ -1,6 +1,6 @@
 [project] 
 name = "churten"
-version = "0.0.1"
+version = "0.0.2"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -16,6 +16,8 @@ dependencies = [
   "torchvision",
   "tensordict",
   "tabulate",
+  "optree>=0.18.0",
+  "beartype>=0.22.5",
 ]
 
 [dependency-groups]
@@ -36,7 +38,8 @@ venv = ".venv"
 [tool.uv]
 prerelease = "allow"
 
-#[tool.uv.sources]
+[tool.uv.sources]
+optree = { git = "https://github.com/metaopt/optree.git" }
 #torch = [
 #  { index = "pytorch-cu129"},
 #]

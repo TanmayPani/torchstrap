@@ -1,4 +1,3 @@
-from __future__ import generators
 import math
 import itertools
 from typing import Optional

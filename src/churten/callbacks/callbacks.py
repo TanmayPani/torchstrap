@@ -1,6 +1,6 @@
 """ Basic callback definition. """
 
-from sklearn.base import BaseEstimator
+#from sklearn.base import BaseEstimator
 
 
 __all__ = ['Callback']
@@ -28,26 +28,26 @@ class Callback:
         """
         return self
 
-    def on_train_begin(self, net, **kwargs):
+    def on_train_begin(self, state, history, **kwargs):
         """Called at the beginning of training."""
 
-    def on_train_end(self, net, **kwargs):
+    def on_train_end(self, state, history, **kwargs):
         """Called at the end of training."""
 
-    def on_epoch_begin(self, net, **kwargs):
+    def on_epoch_begin(self, state, history, **kwargs):
         """Called at the beginning of each epoch."""
 
-    def on_epoch_end(self, net, **kwargs):
+    def on_epoch_end(self,  state, history, **kwargs):
         """Called at the end of each epoch."""
 
-    def on_batch_begin(self, net, **kwargs):
+    def on_batch_begin(self,  state, history, **kwargs):
         """Called at the beginning of each batch."""
 
-    def on_batch_end(self, net, **kwargs):
+    def on_batch_end(self,  state, history, **kwargs):
         """Called at the end of each batch."""
 
     def on_grad_computed(
-            self, net, named_parameters, X=None, y=None, training=None, **kwargs):
+            self,  state, history, named_parameters, X=None, y=None, training=None, **kwargs):
         """Called once per batch after gradients have been computed but before
         an update step was performed.
         """
@@ -55,8 +55,8 @@ class Callback:
     def _get_param_names(self):
         return [key for key in self.__dict__ if not key.endswith('_')]
 
-    def get_params(self, deep=True):
-        return BaseEstimator.get_params(self, deep=deep)
+    #def get_params(self, deep=True):
+    #    return BaseEstimator.get_params(self, deep=deep)
 
-    def set_params(self, **params):
+    #def set_params(self, **params):
         BaseEstimator.set_params(self, **params)

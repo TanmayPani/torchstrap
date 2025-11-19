@@ -1,6 +1,7 @@
-from typing import Protocol
+from beartype.typing import Protocol, runtime_checkable
 import torch
 
+@runtime_checkable
 class TensorTransform(Protocol):
     def __call__(self, input : torch.Tensor) -> torch.Tensor: ...
 

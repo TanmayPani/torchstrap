@@ -1,4 +1,5 @@
 from functools import partial
+from itertools import chain
 from math import pi
 
 from matplotlib import cm as cm
@@ -13,7 +14,7 @@ from torch.nn.functional import binary_cross_entropy_with_logits, sigmoid
 
 from torch.distributions import Categorical
 
-from churten.ensemble import Ensemble
+from churten.stateless import StatelessModule
 from churten.optimizer import Adam
 
 def make_spirals(n_samples, noise_std=0., rotations=1.):
@@ -21,6 +22,7 @@ def make_spirals(n_samples, noise_std=0., rotations=1.):
     rs = ts ** 0.5
     thetas = rs * rotations * 2 * pi
     signs = torch.randint(0, 2, (n_samples,)) * 2 - 1
+
     labels = (signs > 0).to(torch.int8)
 
     xs = rs * signs * torch.cos(thetas) + torch.randn(n_samples) * noise_std
@@ -73,15 +75,16 @@ def parallel_batch_iterator(
 def predict_fn(model, params, buffers, inputs):
     return sigmoid(functional_call(model, (params, buffers), inputs))
 
-def predict_on_mesh(ensemble, width=1.5, steps=50):
+def predict_on_mesh(ensemble, state, width=1.5, steps=50):
     with torch.inference_mode():
-        xs = torch.linspace(-width, width, steps=steps, device=ensemble.device)
-        ys = torch.linspace(-width, width, steps=steps, device=ensemble.device)
+        xs = torch.linspace(-width, width, steps=steps, device=state.device)
+        ys = torch.linspace(-width, width, steps=steps, device=state.device)
         xx, yy = torch.meshgrid(xs, ys, indexing="xy")
-    
-        points = torch.stack([xx.ravel(), yy.ravel()], dim=1).expand(ensemble.num_replicas, xx.numel(), 2)
+   
+        points = torch.stack([xx.ravel(), yy.ravel()], dim=1).expand(100, xx.numel(), 2)
         fpred = vmap(partial(predict_fn, ensemble._base_model))
-        z = fpred(ensemble._params_dict, ensemble._buffers_dict, points)
+        print(points.shape)
+        z = fpred(state.param_dict, state.buffer_dict, points)
 
         z_mean = z.mean(dim=0).reshape_as(xx)
 
@@ -138,25 +141,27 @@ if __name__ == "__main__":
 
     print("Initialized dataset ...")
     
-    ensemble = Ensemble(
+    ensemble , state= StatelessModule.fitter_and_state(
         make_classifier_module,
-        criterion=binary_cross_entropy_with_logits,
+        2, 512, 512, 1,
         num_replicas=num_replicas,
-        model_init_args=(2, 512, 512, 1),
         device = device,
-        model_init_randomness="different",
+        init_randomness="different",
     )
 
     print("Initialized ensemble for bootstrapping ...")
     
-    optimizer = Adam(lr=1e-3, batch_size=(num_replicas,), device=device)
-    optimizer.init(ensemble._params_dict)
-    ensemble.train(True)
-    losses = ensemble.fit_step(optimizer, data_iterator)
+    history = ensemble.fit(
+        Adam, 
+        binary_cross_entropy_with_logits,
+        state, 
+        data_iterator,
+    )
     
     print("Training ensemble with bootstrapping done ...")
 
-    dy, y = torch.std_mean(losses.detach_().cpu(), dim=0)
+    losses = torch.stack(*[loss for loss in history["batches"]["train_loss"]])
+    dy, y = torch.std_mean(losses, dim=1)
     x = torch.arange(num_batches)
 
     fig0, ax0 = plt.subplots()
@@ -169,7 +174,7 @@ if __name__ == "__main__":
     fig0.savefig("loss.png")
 
 
-    xx, yy, z = predict_on_mesh(ensemble)
+    xx, yy, z = predict_on_mesh(ensemble, state)
 
     fig = plt.figure()
     #fig.suptitle("Predictions from bootstraped ensemble", weight="bold")

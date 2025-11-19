@@ -1,6 +1,6 @@
 from copy import deepcopy
-from typing import Callable, Union, Protocol, Optional, Any
-from typing import runtime_checkable
+from beartype.typing import Callable, Union, Protocol, Optional, Any
+from beartype.typing import runtime_checkable
 from collections.abc import Iterator, Mapping, Sequence
 
 import torch
@@ -18,14 +18,12 @@ from torch.nn import Module
 
 import torch.nn.functional as F
 
-from churten.optimizer import GradientTransformations
-from churten.utils import params_for
+from churten.utils._utils import params_for
 
 @runtime_checkable
 class TensorCallable(Protocol):
     def __call__(
             self,
-            #tensor : Tensor | Sequence[Tensor] | Mapping[str, Tensor],
             *args : Any, 
             **kwargs : Any,
     ) -> Tensor | tuple[Tensor, ...]:
@@ -150,8 +148,10 @@ class MLP(Module):
 
         self.to(device=device, dtype=dtype)
 
-    def forward(self, x, training=False):
-        self.train(mode=training)
+    #def forward(self, x, training=False):
+    #TODO: Why did I set it like this??
+    def forward(self, x):
+        #self.train(mode=training)
         #print(x[0])
         for layer in self.layers:
             x = layer(x)

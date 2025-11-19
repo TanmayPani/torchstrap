@@ -16,7 +16,8 @@ from torch.optim.lr_scheduler import MultiStepLR
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import StepLR
 from torch.optim.optimizer import Optimizer
-from .callbacks import Callback
+ 
+from churten.callbacks import Callback
 
 __all__ = ['LRScheduler', 'WarmRestartLR']
 
@@ -93,14 +94,14 @@ class LRScheduler(Callback):
                   if not (key in excluded or key.endswith('_'))}
         return kwargs
 
-    def on_train_begin(self, net, **kwargs):
-        if net.history:
+    def on_train_begin(self, state, history = None, **kwargs):
+        if history:
             try:
-                self.batch_idx_ = sum(net.history[:, 'train_batch_count'])
+                self.batch_idx_ = sum(history["train_batch_count"])
             except KeyError:
-                self.batch_idx_ = sum(len(b) for b in net.history[:, 'batches'])
+                self.batch_idx_ = sum(len(b) for b in history['batches'])
         self.lr_scheduler_ = self._get_scheduler(
-            net, self.policy_, **self.kwargs
+            state, history, self.policy_, **self.kwargs
         )
 
     def _step(self, net, lr_scheduler, score=None):
@@ -163,11 +164,11 @@ class LRScheduler(Callback):
         else:
             self._step(net, self.lr_scheduler_)
 
-    def on_batch_end(self, net, training = True, **kwargs):
+    def on_batch_end(self, state, history, training = True, **kwargs):
         if not training or self.step_every != 'batch':
             return
 
-        self._record_last_lr(net, kind='batch')
+        self._record_last_lr(state, history, kind='batch')
 
         if isinstance(self.lr_scheduler_, ReduceLROnPlateau):
             if callable(self.monitor):
@@ -188,7 +189,7 @@ class LRScheduler(Callback):
 
         self.batch_idx_ += 1
 
-    def _get_scheduler(self, net, policy, **scheduler_kwargs):
+    def _get_scheduler(self, state, history, policy, **scheduler_kwargs):
         """Return scheduler, based on indicated policy, with appropriate
         parameters.
         """
@@ -196,10 +197,10 @@ class LRScheduler(Callback):
                 (policy not in [ReduceLROnPlateau])
                 and ('last_epoch' not in scheduler_kwargs)
         ):
-            last_epoch = len(net.history) - 1
+            last_epoch = history.num_epochs - 1
             scheduler_kwargs['last_epoch'] = last_epoch
 
-        return policy(net.optimizer_, **scheduler_kwargs)
+        return policy(state, **scheduler_kwargs)
 
 
 class WarmRestartLR(_LRScheduler):

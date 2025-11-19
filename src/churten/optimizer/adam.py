@@ -1,156 +1,107 @@
-from copy import deepcopy
-from collections.abc import Sequence
-from typing import Any, Optional
-from dataclasses import field
+from functools import partial
+from optree.dataclasses import dataclass, field
+
+from beartype.typing import Optional
+
+from optree import tree_map
+from optree import PyTree, PyTreeSpec
+from optree import tree_map, tree_transpose_map, tree_iter 
+from optree import tree_flatten, tree_unflatten, tree_flatten_one_level
+from optree import tree_structure, treespec_one_level, treespec_list, treespec_leaf
 
 import torch
 from torch import Tensor
 from torch.optim.adam import adam
 
-from tensordict import TensorDictBase
-from tensordict import TensorDict
+from churten.utils.typing import Vector, FloatScalarLike
 
-from .grad_transform import GradientTransformations
+from .grad_transform import GradientTransformation 
 from .grad_transform import OptimState
-from .grad_transform import make_tensor_attr, make_non_tensor_attr
+from .grad_transform import tensor_factory
 
-class AdamOptState(OptimState):
-    exp_avgs : TensorDictBase = field(default_factory = TensorDict)
-    exp_avg_sqs : TensorDictBase = field(default_factory = TensorDict)
-    max_exp_avg_sqs : TensorDictBase = field(default_factory = TensorDict)
-    state_steps : TensorDictBase = field(default_factory = TensorDict)
-    beta1: Tensor = field(default=torch.as_tensor(0.9, dtype=torch.float32))
-    beta2: Tensor = field(default=torch.as_tensor(0.999, dtype=torch.float32))
-    eps: Tensor = field(default=torch.as_tensor(1e-8, dtype=torch.float32))
-    weight_decay: Tensor = field(default=torch.as_tensor(0, dtype=torch.float32))
-    amsgrad               : bool = False
-    maximize              : bool = False
-    decoupled_weight_decay: bool = False
-    foreach               : bool = False
-    capturable            : bool = False
-    differentiable        : bool = False
-    fused                 : bool = False
-    grad_scale: Optional[Tensor] = None
-    found_inf: Optional[Tensor] = None
-    has_complex: bool = False
+@dataclass(namespace="churten.state")
+class AdamState(OptimState):
+    exp_avgs               : list[Tensor] = field(default_factory=list)
+    exp_avg_sqs            : list[Tensor] = field(default_factory=list)
+    max_exp_avg_sqs        : list[Tensor] = field(default_factory=list)
+    lr                     : Vector       = field(default_factory=tensor_factory(1e-3) )
+    beta1                  : Vector       = field(default_factory=tensor_factory(0.9)  )
+    beta2                  : Vector       = field(default_factory=tensor_factory(0.999))
+    eps                    : Vector       = field(default_factory=tensor_factory(1e-8) )
+    weight_decay           : Vector       = field(default_factory=tensor_factory(1e-2) )
+    amsgrad                : bool         = field(default=False, pytree_node=False)
+    decoupled_weight_decay : bool         = field(default=True , pytree_node=False)
 
-    def check_state(self):
-        if not self.capturable and self.foreach:
-            raise ValueError(
-                "FuncAdam doesn't support capturable=False and foreach=True"
-            )
-        
-        if not torch.all(torch.ge(self.lr, 0.0)):
-            raise ValueError(f"Invalid learning rate: {self.lr}")
-        if not torch.all(torch.ge(self.eps, 0.0)):
-            raise ValueError(f"Invalid epsilon value: {self.eps}")
-        if not torch.all(torch.logical_and(torch.ge(self.beta1, 0.0), torch.lt(self.beta1, 1.0))):
-            raise ValueError(f"Invalid beta parameter at index 0: {self.beta1}")
-        if not torch.all(torch.logical_and(torch.ge(self.beta2, 0.0), torch.lt(self.beta2, 1.0))):
-            raise ValueError(f"Invalid beta parameter at index 1: {self.beta2}")
-        if not torch.all(torch.ge(self.weight_decay, 0.0)):
-            raise ValueError(f"Invalid weight_decay value: {self.weight_decay}")
-               
-    def init(self, _params: dict[str, Tensor] | TensorDict):
-        super().init(_params)
-        self.exp_avgs = deepcopy(self.params).zero_()
-        self.exp_avg_sqs = deepcopy(self.params).zero_()
-        self.max_exp_avg_sqs = deepcopy(self.params).zero_()
-        for param_name in self.params.keys():
-            self.state_steps[param_name] = torch.zeros(
-                self.batch_size, dtype=torch.float32, device=self.params.device,
-            )
+    def __post_init__(self):
+        _zeros_like = partial(torch.zeros_like, memory_format=torch.preserve_format)
+        if len(self.exp_avgs) == 0:
+            self.exp_avgs = [_zeros_like(p) for p in self.params]
 
-        #self.beta1 = self.beta1.to(dtype=torch.float32, device=self.params.device)
-        #self.beta2 = self.beta2.to(dtype=torch.float32, device=self.params.device)
-        #self.eps = self.eps.to(dtype=torch.float32, device=self.params.device)
-        #self.weight_decay = self.weight_decay.to(dtype=torch.float32, device=self.params.device)
+        if len(self.exp_avg_sqs) == 0:
+            self.exp_avg_sqs = [_zeros_like(p) for p in self.params]
 
-        #if torch.is_tensor(self.grad_scale):
-        #    self.grad_scale = self.grad_scale.to(dtype=torch.float32, device=self.params.device)
-        #if torch.is_tensor(self.found_inf):
-        #    self.found_inf = self.found_inf.to(dtype=torch.float32, device=self.params.device)
+        if self.amsgrad and len(self.max_exp_avg_sqs) == 0:
+            self.max_exp_avg_sqs = [_zeros_like(p) for p in self.params]
+        super().__post_init__()
 
-    def set_update_args(self) -> tuple[list[Any], dict[str, Any]]:
-        self._update_args = super().set_update_args()
-
-        self._update_args[0].extend([
-            list(self.exp_avgs.values()       ), 
-            list(self.exp_avg_sqs.values()    ), 
-            list(self.max_exp_avg_sqs.values()), 
-            list(self.state_steps.values()    ),
-        ])
-
-        self._update_args[0].extend([
-            getattr(self, key) for key in  (
-                "foreach",
-                "capturable",
-                "differentiable",
-                "fused",
-                "grad_scale",
-                "found_inf",
-                "has_complex",
-                "decoupled_weight_decay",
-            )
-        ])
-
-        self._update_args[1].update({
-            key : self.__dict__["_tensordict"][key] for key in (
-                "beta1", 
-                "beta2",
-                "weight_decay",
-                "eps",
-                "maximize",
-                "amsgrad",
-            )
-        })
-
-        return self._update_args
-
-
-class Adam(GradientTransformations):
-    def __init__(
-        self, 
-        lr = 1e-3,
-        betas = (0.9, 0.999),
-        eps: float = 1e-8,
-        weight_decay: float = 0,
-        amsgrad: bool = False,
+    @classmethod
+    def from_param_dict(
+        cls, 
+        param_pytree : dict[str, Tensor],
+        /,
         *,
-        maximize: bool = False,
-        differentiable: bool = False,
-        decoupled_weight_decay: bool = False,
-        batch_size : Sequence[int] = [],
-        device : str = "cpu",
-        **kwargs,
+        lr           : FloatScalarLike = 1e-3,
+        beta1        : FloatScalarLike = 0.9 ,
+        beta2        : FloatScalarLike = 0.999,    
+        eps          : FloatScalarLike = 1e-8,    
+        weight_decay : FloatScalarLike = 1e-2,   
+        batch_dim : Optional[int] = None,
+        **kwargs : bool,
     ):
-        if device == "cpu": 
-            capturable = False 
-            fused = False
-            foreach = False
-        else:
-            capturable = True
-            fused = True
-            foreach = False
-       
-        optim_state = {
-            "lr"                     : make_tensor_attr("lr"                    , lr                    , batch_size=batch_size ),
-            "beta1"                  : make_tensor_attr("betas[0]"              , betas[0]              , batch_size=batch_size ), 
-            "beta2"                  : make_tensor_attr("betas[1]"              , betas[1]              , batch_size=batch_size ),
-            "eps"                    : make_tensor_attr("eps"                   , eps                   , batch_size=batch_size ),
-            "weight_decay"           : make_tensor_attr("weight_decay"          , weight_decay          , batch_size=batch_size ),
+        return cls._from_pytree(
+            param_pytree,
+            batch_dim = batch_dim,
+            lr = lr, 
+            beta1 = beta1,  
+            beta2 = beta2,
+            eps = eps,
+            weight_decay = weight_decay,
+            **kwargs,
+        )
 
-            "amsgrad"                : make_non_tensor_attr("amsgrad"               , amsgrad               , batch_size=batch_size ),
-            "maximize"               : make_non_tensor_attr("maximize"              , maximize              , batch_size=batch_size ), 
-            "foreach"                : make_non_tensor_attr("foreach"               , foreach               , batch_size=batch_size ),
-            "capturable"             : make_non_tensor_attr("capturable"            , capturable            , batch_size=batch_size ),
-            "differentiable"         : make_non_tensor_attr("differentiable"        , differentiable        , batch_size=batch_size ),
-            "fused"                  : make_non_tensor_attr("fused"                 , fused                 , batch_size=batch_size ),
-            "decoupled_weight_decay" : make_non_tensor_attr("decoupled_weight_decay", decoupled_weight_decay, batch_size=batch_size ),
-            "batch_size" : batch_size,
-        }
-        super().__init__(AdamOptState(**optim_state) ,device=device, **kwargs)
+class Adam(metaclass=GradientTransformation):
+    state_type : type[OptimState] = AdamState
+    @classmethod
+    def update(cls, state : AdamState) -> AdamState:
+        if state.num_states > 1:
+            raise ValueError(
+                "Multiple states in a single optimizer step not supported yet."
+            )
 
-    def step(self, *args, **kwargs):
-        adam(*args, **kwargs)
+        adam(
+            state.params,
+            state.grads,
+            state.exp_avgs,
+            state.exp_avg_sqs,
+            state.max_exp_avg_sqs,
+            state.state_steps,
+            amsgrad = state.amsgrad,
+            has_complex = False,
+            beta1 = state.beta1,
+            beta2 = state.beta2,
+            lr = state.lr,
+            weight_decay = state.weight_decay,
+            eps = state.eps,
+            maximize = state.maximize,
+            foreach = state.foreach,
+            capturable = state.capturable,
+            differentiable = state.differentiable,
+            fused = state.fused,
+            grad_scale = None,
+            found_inf = None,
+            decoupled_weight_decay = state.decoupled_weight_decay,
+        )
+
+        return state
+
 

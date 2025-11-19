@@ -1,4 +1,4 @@
-from .sampler import *
+from churten.utils.data.sampler import *
 __all__ = [ 
             "random_split",
             "undersample",

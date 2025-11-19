@@ -22,7 +22,7 @@ from torch.nn import BCELoss
 from torch.nn import BCEWithLogitsLoss
 from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import PackedSequence
-#from torch.utils.data.dataset import Subset
+
 
 class Ansi(Enum):
     BLUE = '\033[94m'
@@ -75,7 +75,7 @@ def to_device(X, device, dtype=None):
     if isinstance(X, (tuple, list)) and (type(X) != PackedSequence):
         return type(X)(to_device(x, device) for x in X)
 
-    if isinstance(X, torch.distributions.distribution.Distribution):
+    if isinstance(X, torch.distributions.Distribution):
         return X
 
     return X.to(device=device, dtype=dtype)

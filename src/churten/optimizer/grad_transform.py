@@ -1,161 +1,240 @@
-import os
+from enum import Enum
+from abc import ABC
 
-from typing import Any
-from typing import Optional
-
-from collections.abc import Sequence
+#from dataclasses import dataclass, field, KW_ONLY
+import threading
 
 from copy import deepcopy
-from dataclasses import field
+from functools import partial 
+
+from beartype.typing import Self, Any, Optional, Union
+from beartype.door import is_bearable
 
 import torch
 from torch import Tensor
 
-from tensordict import NonTensorData
-from tensordict import TensorDictBase
-from tensordict import TensorDict
-from tensordict import TensorClass
+from optree import PyTreeSpec, treespec_accessors, treespec_dict
+from optree import tree_flatten, tree_unflatten, tree_flatten_one_level
+from optree import tree_transpose_map_with_path 
 
-class OptimState(TensorClass["nocast"]):
-    params : TensorDictBase = field(default_factory = TensorDict)
-    grads : TensorDictBase = field(default_factory = TensorDict)
-    lr: Tensor = field(default=torch.as_tensor(1e-3, dtype=torch.float32))
-    _update_args : Optional[tuple[list[Any], dict[str, Any]]] = None
-    def check_state(self) -> None:
-        raise NotImplementedError("Use a subclass defined for a paritcular optimizer!")
-    
-    def init(
-        self, 
-        _params : dict[str, Tensor] | TensorDict
-    ):
-        if isinstance(_params, TensorDict):
-            self.params = _params
-        else:
-            self.params = TensorDict(
-                _params, 
-                batch_size=self.batch_size,
-            )
-        #self.device = self.params.device
-        self.grads = deepcopy(self.params).zero_()
-        #self.lr = self.lr.to(dtype=torch.float32, device=self.device)
+from optree.dataclasses import dataclass, field, InitVar
 
-    @property
-    def update_args(self) -> tuple[list[Any], dict[str, Any]]:
-        if self._update_args is None:
-            return self.set_update_args()
-        else:
-            return self._update_args
+from churten.utils.typing import Vector, Scalar 
 
-    def set_update_args(self) -> tuple[list[Any], dict[str, Any]]:
-        self._update_args = ([
-            list(self.params.values()), 
-            list(self.grads.values()), 
-        ], {"lr" : self.lr},)
+def tensor_factory(default, **kwargs):
+    return partial(torch.as_tensor, default, **kwargs)
 
-        return self._update_args
+def factory_kwargs(x : Tensor) -> dict[str, Any]:
+    return dict(
+        device = x.device,
+        dtype = x.dtype,
+    )
 
-class GradientTransformations:
-    def __init__(
-        self, 
-        state : OptimState,
-        device : str | torch.device = "cpu",
-        #dtype : torch.dtype = torch.float32,
-    ):
-        self.device = device
-        self.state = state #dtype = dtype)
-        self.num_stacked_states = self.state.numel()
+@dataclass(namespace="churten.state")
+class OptimState:
+    param_spec     : PyTreeSpec   = field(default_factory=treespec_dict, pytree_node=False)
+    batch_dim      : Optional[int]= field(default=None)
+    params         : list[Tensor] = field(default_factory=list            )
+    state_steps    : list[Vector] = field(default_factory=list            )
+    grads          : list[Tensor] = field(default_factory=list            )
+    maximize       : bool         = field(default=False, pytree_node=False)
+    foreach        : bool         = field(default=False, pytree_node=False)
+    capturable     : bool         = field(default=False, pytree_node=False)
+    differentiable : bool         = field(default=False, pytree_node=False)
+    fused          : bool         = field(default=True , pytree_node=False)
 
-        self.mask = [True]*self.num_stacked_states
-   
-    @property
-    def state(self):
-        return self._state
-
-    @state.setter
-    def state(self, val):
-        self._state = val.to(device=self.device)
-
-    @property
-    def mask(self):
-        return self._mask
-
-    @mask.setter
-    def mask(self, val):
-        self._mask = torch.as_tensor(
-            val, 
-            dtype=torch.bool, 
-            #requires_grad = False,
-        ).requires_grad_(False).squeeze_()
-
-        assert self._mask.shape == self.state.batch_size
-        self.num_active_states = self.state[self._mask].numel()
-        #print(self.num_active_states)
-
-    def init(self, params : dict[str, Tensor]):
-        params_td = TensorDict(params, batch_size=self._state.batch_size)
-        self.state = self.state.to(device=params_td.device, dtype=params_td.dtype)
-        self.state.init(params_td)
-
-    def apply_gradients(
-        self,
-        grads : dict[str, Tensor],
-    ):
-        self.state.grads.update_(grads, keys_to_update=list(grads.keys()))
+    def __post_init__(self):
+        _zeros = partial(torch.zeros, device = self.device, dtype = torch.float32)
+        _zero_tensor = partial(torch.tensor, 0.0, device = self.device, dtype=torch.float32)
         
-        if self.state.batch_dims == 0 :
-            args, kwargs = self.state.update_args
-            self.step(*args, **kwargs)
-        else:
-            for istate in range(self.num_stacked_states):
-                args, kwargs = self.state[istate].update_args
-                self.step(*args, **kwargs)
-    
-    def step(
+        if len(self.state_steps) == 0:
+            self.state_steps = [
+                _zeros(self.shape) if self.capturable or self.fused \
+                else _zero_tensor().repeat(self.shape) for p in self.params
+            ]
+
+        if len(self.grads) == 0:
+            self.gradients = None
+        
+        self.validate_fields()
+
+    def validate_fields(self):
+        _as_tensor = partial(torch.as_tensor, device = self.device, dtype=torch.float32)
+        for name, field in self.__dataclass_fields__.items():
+            value = getattr(self, name)
+            if field.type == Vector:
+                value_tensor = _as_tensor(value).squeeze_()
+                if value_tensor.shape == self.shape:
+                    setattr(self, name, value_tensor)
+                elif value_tensor.numel() == 1:
+                    setattr(self, name, value_tensor.repeat(self.shape))
+                else:
+                    raise ValueError(
+                        f"Got tensor {value} with incompatible shape "
+                        f"{value_tensor.shape} for state  with shape {self.shape}"
+                    )
+                continue
+            
+            if field.type == list[Tensor] or field.type == list[Vector]:
+                if len(value) > 0 and len(value) != self.num_params_per_state:
+                    raise ValueError(
+                        f"Attribute {name} is supposed to be defined on a "
+                        f"per-parameter basis, but got {len(value)} {name} for "
+                        f"{self.num_params_per_state} parameters."
+                    )
+
+            if field.type == list[Tensor]:
+                for t in value:
+                    if self.batch_dim is not None and t.shape[self.batch_dim] != self.num_states:
+                        raise ValueError(
+                            f"Tensor from list {name} should have {self.num_states} "
+                            f"elements along non None batch_dim = {self.batch_dim}"
+                        )
+                continue
+            
+            if field.type == list[Vector]:
+                for t in value:
+                    if t.numel() != self.num_states:
+                        raise ValueError(
+                            f"Vector from list {name} should have {self.num_states} "
+                            f"elements along non None batch_dim = {self.batch_dim}"
+                        )
+                continue
+        
+    @property
+    def gradients(self):
+        return tree_unflatten(self.param_spec, self.grads)
+
+    @gradients.setter
+    def gradients(
         self, 
-        *args : Any,
-        **kwargs : Any,
+        grads : Optional[dict[str, Tensor]], 
     ):
-        raise NotImplementedError("Use a subclass defined for a paritcular optimizer!")
+        if grads is None:
+            self.grads[:] = [
+                torch.zeros_like(
+                    p, memory_format=torch.preserve_format
+                ) for p in self.params
+            ]
+        else:
+            self.grads[:] = [
+                acc(grads) 
+                for acc in treespec_accessors(self.param_spec)
+            ]
 
-def make_tensor_attr(
-    name : str,
-    val : Any,
-    batch_size = [],
-    dtype = torch.float32,
-    device : str | torch.device = "cpu"
-):
-    res = val if isinstance(val, Tensor) \
-          else torch.as_tensor(val, dtype=dtype, device=device)
-    res.squeeze_()
-    if res.shape == batch_size:
-        return res
-    elif res.shape == ():
-        return torch.full(
-            batch_size, 
-            res.item(), 
-            dtype=dtype,
-            device=device,
+    @property
+    def shape(self):
+        return () if self.batch_dim is None else (self.num_states,)
+
+    @property
+    def device(self):
+        return self.params[0].device
+
+    @property
+    def num_params_per_state(self):
+        return len(self.params)
+
+    @property
+    def num_states(self):
+        if self.batch_dim is None:
+            return 1
+        return self.params[0].shape[self.batch_dim]
+    
+    @classmethod
+    def from_param_dict(
+        cls : type[Self], 
+        param_dict : dict[str, Tensor],
+        /,
+        *,
+        batch_dim : Optional[int] = None,
+        **kwargs : Any,
+    ) -> Self:
+        raise NotImplementedError
+
+    @classmethod
+    def _from_pytree(
+        cls : type[Self], 
+        param_pytree : Any,
+        /,
+        **kwargs,
+    ) -> Self:
+        params, param_spec = tree_flatten(param_pytree)
+        for key, val in kwargs.items():
+            if key not in cls.__dataclass_fields__:
+                continue 
+            field = cls.__dataclass_fields__[key]
+            if field.type == Vector:
+                kwargs[key] = torch.as_tensor(
+                    val, device=params[0].device, dtype=torch.float32
+                )
+            
+        return cls(param_spec=param_spec, params=params, **kwargs)
+
+    def unbind_leaf(self, path, x):
+        if isinstance(x, Tensor):
+            return torch.unbind(x, self.batch_dim)
+        elif path[0] == "batch_dim":
+            return (None,)*self.num_states
+        else:
+            return (x,)*self.num_states
+
+    def unbind(self):
+        if self.batch_dim is None:
+            return (self,)
+        
+        return tree_transpose_map_with_path(
+            self.unbind_leaf, self, none_is_leaf=True, namespace="churten.state", 
         )
-    else:
-        raise ValueError(
-            f"{name} must be a singleton or a structure with "
-            f"shape {batch_size}, but given {res.shape}"
+
+class GradientTransformation(type):
+    _instances = {}
+    _lock = threading.Lock()
+    
+    def __new__(
+        cls, 
+        name : str, 
+        bases : tuple, 
+        attrs : dict[str, Any], 
+    ):
+        if "state_type" not in attrs:
+            raise AttributeError(
+                "Every Optimizer (GradientTransformation) class needs "
+                "to be linked with a state class inheriting from OptimState"
+            )
+        if "update" not in attrs:
+            raise AttributeError(
+                "Need to define an 'update' method to make an optimizer class!"
+            )
+
+        return super().__new__(cls, name, bases, attrs)
+
+    def __call__(
+        cls, 
+        params : Optional[dict[str, Tensor]] = None, 
+        **kwargs,
+    ) -> tuple[Self, OptimState | list[OptimState] | None]:
+        with cls._lock:
+            if cls not in cls._instances:
+                cls._instances[cls] = super().__call__()        
+        return (
+            cls._instances[cls], 
+            cls.state_class.from_param_dict(params, **kwargs) if params else None,
         )
 
-def make_non_tensor_attr(
-    name : str,
-    val : Any,
-    batch_size = [],
-):
-    if isinstance(val, list):
-        if len(batch_size) == 0:
-            return NonTensorData(val, batch_size=batch_size)
-        if len(val) == batch_size[0]:
-            return torch.stack([NonTensorData(v, batch_size=[]) for v in val])
-        raise ValueError(f"{name} must be a singleton or a structure with shape {batch_size}, but given {len(val)}") 
-    else:
-        return NonTensorData(val, batch_size=batch_size)
+    @property
+    def state_class(cls):
+        return getattr(cls, "state_type")
+    
+    def apply_gradient(                                                                      
+        cls,
+        states : OptimState, 
+        active_states : Optional[list[int]] = None,             
+    ) -> tuple[OptimState, ...]:                                      
+        apply_indices = active_states or list(range(states.num_states))
+        _states = states.unbind()
+        for istate in apply_indices:
+            cls.update(_states[istate])
+                                                                                             
+        return _states
 
-
-
-
+                                                                            

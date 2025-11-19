@@ -1,20 +1,23 @@
-from . import data
+from beartype.claw import beartype_all, beartype_this_package
+from beartype import BeartypeConf
+beartype_this_package()
+#beartype_all(conf=BeartypeConf(violation_type=UserWarning))
+
 from . import optimizer
-from . import nn
 from . import utils
-from . import ensemble
+from . import stateless
 from . import history
 from . import callbacks
 
+
 __all__ = [
-    "data",
     "optimizer",
-    "nn",
     "utils",
-    "ensemble",
+    "stateless",
     "history",
     "callbacks",
 ]
+
 
 def hello() -> str:
     return "Hello from churten!"
