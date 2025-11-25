@@ -16,7 +16,6 @@ from .callbacks import Callback
 
 __all__ = ["PassThroughScoring"]
 
-
 class PassThroughScoring(Callback):
     """Creates scores on epoch level based on batch level scores
     """
@@ -47,20 +46,18 @@ class PassThroughScoring(Callback):
         else:
             bs_key = 'valid_batch_size'
 
-
-
         weights = history['batches'][bs_key][-1]
         scores = history['batches'][self.name][-1]
 
-
         stacked_scores = torch.stack(scores)
-        stacked_weights = torch.stack(weights)
+        stacked_weights = torch.stack(weights).unsqueeze_(-1)
 
-        def weighted_sum(x, wt):
-            return x.mul(wt).sum()
 
-        score_avgs = torch.vmap(weighted_sum)(stacked_scores, stacked_weights)
-        return score_avgs.div_(stacked_weights.sum())
+        w_sum = stacked_weights.sum()
+        
+        wxs_sum = stacked_scores.mul_(stacked_weights).sum(0)
+
+        return wxs_sum.div_(w_sum)
 
     # pylint: disable=unused-argument,arguments-differ
     def on_epoch_end(self, state, history, **kwargs):

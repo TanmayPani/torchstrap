@@ -370,8 +370,9 @@ def _check_f_arguments(caller_name, **kwargs):
     """Check file name arguments and return them
     """
     if kwargs.get('f_params') and kwargs.get('f_module'):
-        raise TypeError("{} called with both f_params and f_module, please choose one"
-                        .format(caller_name))
+        raise TypeError(
+            f"{caller_name} called with both f_params and f_module, please choose one"
+        )
 
     kwargs_module = {}
     kwargs_other = {}

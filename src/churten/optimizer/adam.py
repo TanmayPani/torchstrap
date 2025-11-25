@@ -1,7 +1,7 @@
 from functools import partial
-from optree.dataclasses import dataclass, field
-
 from beartype.typing import Optional
+
+from optree.dataclasses import dataclass, field
 
 from optree import tree_map
 from optree import PyTree, PyTreeSpec
@@ -14,21 +14,19 @@ from torch import Tensor
 from torch.optim.adam import adam
 
 from churten.utils.typing import Vector, FloatScalarLike
-
-from .grad_transform import GradientTransformation 
-from .grad_transform import OptimState
-from .grad_transform import tensor_factory
+from churten.state import OptimState
+from churten.optimizer.grad_transform import GradientTransformation
 
 @dataclass(namespace="churten.state")
 class AdamState(OptimState):
     exp_avgs               : list[Tensor] = field(default_factory=list)
     exp_avg_sqs            : list[Tensor] = field(default_factory=list)
     max_exp_avg_sqs        : list[Tensor] = field(default_factory=list)
-    lr                     : Vector       = field(default_factory=tensor_factory(1e-3) )
-    beta1                  : Vector       = field(default_factory=tensor_factory(0.9)  )
-    beta2                  : Vector       = field(default_factory=tensor_factory(0.999))
-    eps                    : Vector       = field(default_factory=tensor_factory(1e-8) )
-    weight_decay           : Vector       = field(default_factory=tensor_factory(1e-2) )
+    lr                     : Vector       = field(default_factory=partial(torch.as_tensor, 1e-3 ))
+    beta1                  : Vector       = field(default_factory=partial(torch.as_tensor, 0.9  ))
+    beta2                  : Vector       = field(default_factory=partial(torch.as_tensor, 0.999))
+    eps                    : Vector       = field(default_factory=partial(torch.as_tensor, 1e-8 ))
+    weight_decay           : Vector       = field(default_factory=partial(torch.as_tensor, 1e-2 ))
     amsgrad                : bool         = field(default=False, pytree_node=False)
     decoupled_weight_decay : bool         = field(default=True , pytree_node=False)
 
@@ -49,18 +47,18 @@ class AdamState(OptimState):
         cls, 
         param_pytree : dict[str, Tensor],
         /,
+        batch_size : tuple[int],
         *,
         lr           : FloatScalarLike = 1e-3,
         beta1        : FloatScalarLike = 0.9 ,
         beta2        : FloatScalarLike = 0.999,    
         eps          : FloatScalarLike = 1e-8,    
         weight_decay : FloatScalarLike = 1e-2,   
-        batch_dim : Optional[int] = None,
         **kwargs : bool,
     ):
         return cls._from_pytree(
             param_pytree,
-            batch_dim = batch_dim,
+            batch_size=batch_size,
             lr = lr, 
             beta1 = beta1,  
             beta2 = beta2,
@@ -70,12 +68,12 @@ class AdamState(OptimState):
         )
 
 class Adam(metaclass=GradientTransformation):
-    state_type : type[OptimState] = AdamState
+    state_class : type[OptimState] = AdamState
     @classmethod
     def update(cls, state : AdamState) -> AdamState:
-        if state.num_states > 1:
+        if state.batch_size != ():
             raise ValueError(
-                "Multiple states in a single optimizer step not supported yet."
+                "Multiple replicas in a single optimizer step not supported yet."
             )
 
         adam(

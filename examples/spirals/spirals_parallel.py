@@ -16,6 +16,7 @@ from torch.distributions import Categorical
 
 from churten.stateless import StatelessModule
 from churten.optimizer import Adam
+from churten.callbacks import Checkpoint, EarlyStopping
 
 def make_spirals(n_samples, noise_std=0., rotations=1.):
     ts = torch.linspace(0, 1, n_samples)
@@ -140,23 +141,31 @@ if __name__ == "__main__":
     )
 
     print("Initialized dataset ...")
+    optimizer_cls = Adam
     
-    ensemble , state= StatelessModule.fitter_and_state(
+    ensemble , optimizer, state= StatelessModule.init(
         make_classifier_module,
-        2, 512, 512, 1,
+        optimizer_cls,
+        model_init_args=(2, 512, 512, 1),
         num_replicas=num_replicas,
         device = device,
         init_randomness="different",
     )
 
+    print(optimizer is optimizer_cls)
     print("Initialized ensemble for bootstrapping ...")
     
     history = ensemble.fit(
-        Adam, 
+        optimizer, 
         binary_cross_entropy_with_logits,
         state, 
         data_iterator,
+        callbacks = [
+            ("checkpoint", Checkpoint(monitor="train_loss_best")),
+            ("early_stopping", EarlyStopping(monitor="train_loss")),
+        ]
     )
+
     
     print("Training ensemble with bootstrapping done ...")
 

@@ -10,11 +10,9 @@ requires-python = ">=3.13"
 
 dependencies = [
   "numpy>=2.2.4",
-  "pyarrow>=19.0.1",
   "scikit-learn>=1.6.1",
   "torch",
   "torchvision",
-  "tensordict",
   "tabulate",
   "optree>=0.18.0",
   "beartype>=0.22.5",

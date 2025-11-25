@@ -20,3 +20,8 @@ Vector = Annotated[
 
 FloatScalarLike = float | Vector | Sequence[float | Scalar]
 
+BoolVector = Annotated[
+    torch.Tensor,
+    IsAttr["ndim", IsEqual[0] | IsEqual[1]] &
+    IsAttr["dtype", IsEqual[torch.bool]]
+]

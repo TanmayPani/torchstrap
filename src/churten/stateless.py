@@ -23,10 +23,10 @@ from optree import tree_structure, treespec_accessors
 from optree import tree_transpose, treespec_one_level
 from optree import treespec_list, treespec_dict, treespec_leaf
 
-from .state import State
-from .optimizer import GradientTransformation, OptimState
-from .callbacks import Callback, PrintLog, PassThroughScoring, EpochTimer
-from .history import History
+from churten.optimizer import GradientTransformation
+from churten.callbacks import Callback, PrintLog, PassThroughScoring, EpochTimer
+from churten.state import State
+from churten.history import History
 
 class StatelessModule(Module):
     _compiled_eval : Optional[Callable] = None  
@@ -38,19 +38,25 @@ class StatelessModule(Module):
 
 
     @classmethod
-    def fitter_and_state(
+    def init(
         cls,
-        modeller : Module | Callable[..., Module],
-        *args,
+        model : Module | Callable[..., Module],
+        optimizer : GradientTransformation,
         num_replicas : int = 1,
         device : str | torch.device = "cpu",
         dtype : torch.dtype = torch.float32,
         requires_grad : bool = False,
         init_randomness : str = "same",
+        model_init_args : Optional[tuple] = None,
+        model_init_kwargs : Optional[dict[str, Any]] = None,
         **kwargs,
     ):
-        if isinstance(modeller, Module):
-            base_model = modeller
+        if model_init_args is None:
+            model_init_args  =()
+        if model_init_kwargs is None:
+            model_init_kwargs = {}
+        if isinstance(model, Module):
+            base_model = model
             models = ModuleList(
                 deepcopy(base_model) \
                     .to(dtype=dtype, device=device) \
@@ -60,7 +66,10 @@ class StatelessModule(Module):
         else:
             match init_randomness:
                 case "same":
-                    base_model = modeller(*args, **kwargs)
+                    base_model = model(
+                        *model_init_args, 
+                        **model_init_kwargs,
+                    )
                     models = ModuleList(
                         deepcopy(base_model) \
                             .to(dtype=dtype, device=device) \
@@ -69,11 +78,11 @@ class StatelessModule(Module):
                     )
                 case "different":
                     models = ModuleList(
-                        modeller(
-                            *args, 
+                        model(
+                            *model_init_args, 
                             dtype=dtype, 
                             device=device, 
-                            **kwargs
+                            **model_init_kwargs
                         ).requires_grad_(False) 
                         for _ in range(num_replicas)
                     )
@@ -81,18 +90,21 @@ class StatelessModule(Module):
     
                 case _:
                     raise ValueError(
-                        "``modeller`` positional argument given Callable that is NOT torch.nn.Module."
+                        "``model`` positional argument given Callable that is NOT torch.nn.Module."
                         f"But ``model_init_randomness`` keyword argument got {init_randomness} "
                         "(value other than [``same``, ``different``]). Either provide an initialized "
                         "torch.nn.Module or pass ``model_init_randomness`` kwarg properly."
                     )
     
-        param_dict, buffer_dict = stack_module_state(models)
-        return (
-            cls(base_model), 
-            State(param_dict, buffer_dict),
+        batch_size=(num_replicas,) if num_replicas > 1 else ()
+        params_and_buffers_dicts = stack_module_state(models)
+        optim, state = optimizer(
+            params_and_buffers_dicts, 
+            batch_size=batch_size, 
+            **kwargs
         )
 
+        return cls(base_model), optim, state
 
     @property 
     def _default_callbacks(self):
@@ -111,46 +123,30 @@ class StatelessModule(Module):
     def get_default_callbacks(self):
         return self._default_callbacks
 
-    def initialize(
+    def initialize_callbacks(
         self,
-        optimizer,
-        state : State,
         callbacks : list[tuple[str, Callback]], 
     ):
-        state.initialize_state(optimizer)
-        
-        callbacks.extend(self.get_default_callbacks())
         _print_cbs = []
         _callbacks = []
-        for i_cb, (cb_name, cb) in enumerate(callbacks):
+        _callback_iter = chain(self._default_callbacks, callbacks)
+        for i_cb, (cb_name, cb) in enumerate(_callback_iter):
             if isinstance(cb, PrintLog):
-                _print_cbs.append(i_cb)
+                _print_cbs.append((cb_name, cb))
                 continue 
-            _callbacks.append(i_cb)
+            _callbacks.append((cb_name, cb))
 
         _callbacks.extend(_print_cbs)
 
-        callbacks[:] = [callbacks[icb] for icb in _callbacks]
-
-        for cb_name, cb in callbacks:
+        for cb_name, cb in _callbacks:
             cb.initialize()
 
-    def notify(self, method_name, state, history, callbacks=None, **kwargs):
-        """Call the callback method specified in ``method_name`` with
-        parameters specified in ``cb_kwargs``.
+        return _callbacks
 
-        Method names can be one of:
-        * on_train_begin
-        * on_train_end
-        * on_epoch_begin
-        * on_epoch_end
-        * on_batch_begin
-        * on_batch_end
-
-        """
+    def notify(self, method_name, state, history, callbacks : Optional[list[tuple[str, Callback]]]=None, **kwargs):
         getattr(self, method_name)(state, history, **kwargs)
         if callbacks is not None:
-            for _, cb in callbacks:
+            for cb_name, cb in callbacks:
                 getattr(cb, method_name)(state, history, **kwargs)
 
     # pylint: disable=unused-argument
@@ -247,16 +243,11 @@ class StatelessModule(Module):
         **kwargs,
     ):
         callbacks = [] if callbacks is None else callbacks
-        if not state.initialized:   
-            self.initialize(
-                optimizer,
-                state,
-                callbacks = callbacks,
-            )
-       
-        #print(callbacks)
+        callbacks = self.initialize_callbacks(callbacks)
+         
         if history is None:
             history = History()
+
         elif len(history) != state.num_replicas:
             raise ValueError(
                 "lengths of history and state collections must be the same"
@@ -303,7 +294,7 @@ class StatelessModule(Module):
         train_iterator : Iterator[tuple[Tensor, Tensor, Tensor]],
         valid_iterator : Optional[Iterator[tuple[Tensor, Tensor, Tensor]]],
         history : History,
-        callbacks : list[tuple[str, Callback]],
+        callbacks : Optional[list[tuple[str, Callback]]],
         *,
         num_epochs,
         **kwargs,
@@ -355,7 +346,7 @@ class StatelessModule(Module):
         state : State, 
         iterator : Iterator[tuple[Tensor, Tensor, Tensor]], 
         history : History,
-        callbacks : list[tuple[str, Callback]],
+        callbacks : Optional[list[tuple[str, Callback]]],
         **kwargs,
     ):
         for input, target, sample_weight in iterator:
@@ -413,11 +404,8 @@ class StatelessModule(Module):
                 **kwargs,
             )
 
-            state.optimizer_state.gradients = grads
-
-            optimizer.apply_gradient(
-                state.optimizer_state, 
-            )
+            state.set_gradients(grads)
+            optimizer.apply_gradient(state)
             return loss
         else:
             loss = self.evaluate(
