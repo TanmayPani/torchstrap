@@ -1,5 +1,6 @@
 from beartype.typing import Any, Optional
 
+import torch
 from torch import Tensor
 
 from churten.state import State
@@ -37,10 +38,14 @@ class GradientTransformation(type):
             ),
         ) if params_and_buffers_dict else cls
 
-    def apply_gradient(                                                                      
+    def apply_gradient(
         cls,
-        states : State, 
-    ) -> State:                                      
-        for istate in states.active_models:
-            getattr(cls, "update")(states[istate].optimizer_state)
+        states : State,
+    ) -> State:
+        active_mask = torch.as_tensor(
+            states.model_status_list,
+            device=states.device,
+            dtype=torch.bool,
+        )
+        getattr(cls, "update")(states.optimizer_state, active_mask=active_mask)
         return states

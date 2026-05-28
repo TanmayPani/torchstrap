@@ -91,7 +91,7 @@ class History(defaultdict):
 
     def to_file(self, f):
         with open_file_like(f, "w") as fp:
-            json.dump(self.to_dict(), fp)
+            json.dump(self.to_dict(), fp, indent=4)
     
     @classmethod
     def from_file(cls, f):

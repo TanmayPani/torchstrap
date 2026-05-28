@@ -96,7 +96,6 @@ class PrintLog(Callback):
 
         d_key = "d_"+key
         if d_key in row:
-            print(key)
             dvalue = row["d_"+key]
             return f"{template.format(value)}+/-{template.format(dvalue)}"
         return template.format(value)

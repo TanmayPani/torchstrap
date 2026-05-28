@@ -1,10 +1,9 @@
-from typing import Annotated
-from collections.abc import Sequence
+from collections.abc import Sequence, Iterable
 
+from beartype.typing import Protocol, Annotated
 from beartype.vale import IsAttr, IsEqual
 
 import torch
-
 
 Scalar = Annotated[
     torch.Tensor, 
@@ -25,3 +24,9 @@ BoolVector = Annotated[
     IsAttr["ndim", IsEqual[0] | IsEqual[1]] &
     IsAttr["dtype", IsEqual[torch.bool]]
 ]
+
+class LoaderT(
+    Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]], 
+    Protocol
+):
+    ...

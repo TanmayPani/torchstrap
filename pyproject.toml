@@ -16,6 +16,7 @@ dependencies = [
   "tabulate",
   "optree>=0.18.0",
   "beartype>=0.22.5",
+  "helion>=1.1.0",
 ]
 
 [dependency-groups]

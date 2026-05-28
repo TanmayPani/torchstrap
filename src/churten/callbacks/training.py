@@ -181,7 +181,7 @@ class EarlyStopping(Callback):
         threshold_mode='rel',
         lower_is_better=True,
         sink=print,
-        load_best=False,
+        load_best=True,
         verbose=True,
     ):
         self.monitor = monitor
@@ -214,15 +214,15 @@ class EarlyStopping(Callback):
 
     def on_epoch_end(self, state, history, **kwargs):
         current_score = history[self.monitor][-1]
-        is_score_improved = self._is_score_improved(current_score)
+        is_model_active = torch.as_tensor(state.model_status_list)
+        is_score_improved = self._is_score_improved(current_score).logical_and_(is_model_active)
         self.misses_ = torch.where(is_score_improved, 0, self.misses_+1)
-        
         self.dynamic_threshold_ = self._calc_new_threshold(current_score, is_score_improved)
         self.best_epoch_[is_score_improved] = history["iepoch"][-1]
         if self.load_best:
-            is_best_epoch = is_score_improved.tolist()
-            for imodel, is_best in enumerate(is_best_epoch):
-                self.best_model_weights_[imodel] = deepcopy(state[imodel].state_dict())
+            for imodel, is_best in enumerate(is_score_improved.tolist()):
+                if is_best:
+                    self.best_model_weights_[imodel] = deepcopy(state[imodel].state_dict())
 
         for i, misses in enumerate(self.misses_.tolist()):
             if misses == self.patience:
@@ -233,22 +233,28 @@ class EarlyStopping(Callback):
                         f"improved in the last {self.patience} epochs.", 
                         verbose=self.verbose
                     )
+                if not any(state.model_status_list):
+                    self._sink(f"Stopping since {self.monitor} has not improved in the last "
+                           f"{self.patience} epochs for any module.",
+                           verbose=self.verbose)
+                    raise KeyboardInterrupt
 
 
     def on_train_end(self, state, history, **kwargs):
         if self.load_best:
             for imodel in range(state.num_replicas):
                 if (
-                    (self.best_epoch_[imodel] != history["epoch"][-1]) and \
+                    (self.best_epoch_[imodel] != history["iepoch"][-1]) and \
                     (self.best_model_weights_[imodel] is not None)
                 ):
                     state[imodel].load_state_dict(
                         self.best_model_weights_[imodel]
                     ) 
                     self._sink(
-                        f"Restoring best model from epoch {self.best_epoch_[imodel]}.", 
+                        f"Restoring best version of model {imodel} from epoch {self.best_epoch_[imodel]}.", 
                         verbose=self.verbose
                     )
+
 
     def _is_score_improved(self, score : torch.Tensor) -> torch.Tensor:
         if self.lower_is_better:

@@ -31,11 +31,17 @@ class State:
     _state_list : list["State"] = dataclasses.field(default_factory=list, init=False)
 
     def __post_init__(self):
+        # Aliasing invariant: param_dict[name] is the same Tensor object as
+        # optimizer_state.params[i] (from tree_flatten in OptimState._from_pytree),
+        # and per-replica views in _state_list are torch.unbind views of those
+        # same tensors. Optimizer kernels MUST mutate these tensors in place
+        # (.copy_ / .add_ / .index_copy_ / ...) and never reassign list entries,
+        # or the model params and the checkpointing views go out of sync.
         if len(self.model_index_list) == 0:
             self.model_index_list = list(range(self.num_replicas))
             self.model_status_list = [True]*self.num_replicas
 
-        if self.num_replicas == 1: 
+        if self.num_replicas == 1:
             self._state_list = [self]
         else:
             _unbind_fn = partial(torch.unbind, dim=0)
@@ -69,6 +75,13 @@ class State:
                     _optim_state_list,
                 )
             ]
+
+    def reset_status(self, full : bool = False) -> None:
+        for imodel in range(self.num_replicas):
+            self.model_status_list[imodel] = True
+
+        if full:
+            self.optimizer_state.reset()
             
     @classmethod
     def from_stacked_params_and_buffers(
@@ -76,7 +89,7 @@ class State:
         params_and_buffers_dict : tuple[dict[str, Tensor], dict[str, Tensor]],
         optimizer_state_cls : type["OptimState"],
         /,
-        batch_size : tuple[int], 
+        batch_size : tuple[int, ...],
         **kwargs : Any, 
     ) -> Self :
         optimizer_state = optimizer_state_cls.from_param_dict(
@@ -192,9 +205,9 @@ class State:
         _state_dict = {}
         if self.batch_size == ():
             _state_dict["parameters"] = {}
-            _state_dict["buffers"] = {}
             for name, param in self.param_dict.items():
                 _state_dict["parameters"][name] = param.detach().cpu()
+            _state_dict["buffers"] = {}
             for name, buffer in self.buffer_dict.items():
                 _state_dict["buffers"][name] = buffer.detach().cpu()
             _state_dict["optimizer"] = self.optimizer_state.state_dict()
@@ -225,6 +238,15 @@ class State:
             for i in self.active_models:
                 self[i].load_state_dict(state[f"model_{i}"])
 
+        #for iparam, param_name in enumerate(self.optimizer_state.param_names):
+        #    print(
+        #        iparam, 
+        #        param_name, 
+        #        self.param_dict[param_name].data_ptr(), 
+        #        self.optimizer_state.params[iparam].data_ptr(),
+        #        torch.allclose(self.param_dict[param_name], self.optimizer_state.params[iparam])
+        #    )
+
         self.extra_state = state["metadata"]["extra_state"]
         self.batch_size = state["metadata"]["batch_size"]
         self.model_index_list = state["metadata"]["model_index_list"]
@@ -246,7 +268,16 @@ class OptimState:
     def state_dict(self):
         _state_dict = {}
         for name, field in self.__dataclass_fields__.items():
-            _state_dict[name] = getattr(self, name)
+            if name in ["params", "grads"]:
+                continue
+            
+            val = getattr(self, name)
+            if field.type in [list[Tensor], list[Vector]]:
+                _state_dict[name] = [t.detach().cpu() for t in val]
+            elif field.type == Vector:
+                _state_dict[name] = val.detach().cpu()
+            else:
+                _state_dict[name] = val
 
         return _state_dict
 
@@ -254,6 +285,9 @@ class OptimState:
     @torch.no_grad()
     def load_state_dict(self, state):
         for name, field in self.__dataclass_fields__.items():
+            if name in ["params", "grads"]:
+                continue
+
             self_val = getattr(self, name)
             if field.type in [list[Tensor], list[Vector]]:
                 for t_val, self_t_val in zip(state[name], self_val):
@@ -264,6 +298,15 @@ class OptimState:
                 setattr(self, name, state[name])
 
             del state[name]
+
+    def reset(self):
+        for name, field in self.__dataclass_fields__.items():
+            if name in ["params", "grads"]:
+                continue 
+
+            if field.type in [list[Tensor], list[Vector]]:
+                for t in getattr(self, name):
+                    t.zero_()
 
     def __post_init__(self):
         _zeros = partial(

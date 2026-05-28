@@ -144,15 +144,19 @@ class MLP(Module):
             self.layers.append(initialize_layer(input_transform, *input_transform_args, **input_transform_kwargs))
             
         for ilayer, (input_size, output_size) in enumerate(zip(layer_sizes[:-1], layer_sizes[1:])):
-            self.layers.append(Layer(layers[ilayer], input_size, output_size, activation=activations[ilayer], **(list_kwargs[ilayer])))
+            self.layers.append(
+                Layer(
+                    layers[ilayer], 
+                    input_size, 
+                    output_size, 
+                    activation=activations[ilayer], 
+                    **(list_kwargs[ilayer])
+                )
+            )
 
         self.to(device=device, dtype=dtype)
 
-    #def forward(self, x, training=False):
-    #TODO: Why did I set it like this??
     def forward(self, x):
-        #self.train(mode=training)
-        #print(x[0])
         for layer in self.layers:
             x = layer(x)
         return x
