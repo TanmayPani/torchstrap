@@ -184,3 +184,22 @@ uv run python test/optimizer/bench_inplace_adam.py         # the benchmark above
 Set `TORCHSTRAP_HELION_EFFORT={none,quick,full}` to trade kernel autotuning time for
 steady-state speed (`quick` is the default and already converges to the
 full-effort-optimal config on these workloads).
+
+---
+
+## Roadmap
+
+The destination: **a batched, vmap-native drop-in for `torch.optim` and friends** —
+anything you'd train one model with, you can train an ensemble of, fused.
+
+- **The full optimizer family.** `SGD`, `AdamW`, `RMSprop`, `NAdam`, `RAdam`,
+  `Adagrad`, `Adadelta`, `Adamax`, `Rprop`, `ASGD` — each as a batched, per-replica
+  op cut from the same cloth as `Adam`.
+- **Fused kernels everywhere.** Roll the 2D Helion treatment out to every
+  optimizer, then close the remaining gaps: multi-tensor (TensorList) packing into
+  a single launch, and `bf16`/`fp16` ensembles.
+- **Deeper vmap composition.** Support `R > 1` replicas *inside* an outer `vmap` —
+  ensembles of ensembles, for nested resampling and hierarchical sweeps.
+- **Beyond bootstrap.** Lean into what per-replica state unlocks: built-in
+  cross-validation folds, hyperparameter sweeps as replicas, and SWA-style weight
+  averaging across the ensemble.
