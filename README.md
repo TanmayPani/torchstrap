@@ -31,7 +31,6 @@ median of 20 runs:
 | 6 tensors · 265k params/replica           |   8 |        738 µs  |          **394 µs** | **1.9×**|        33.3 → 32.3 MB        |
 | 6 tensors · 265k params/replica           |  32 |       2.99 ms  |         **1.14 ms** | **2.6×**|       130.3 → 129.3 MB       |
 | 6 tensors · 265k params/replica           | 100 |      12.80 ms  |         **2.84 ms** | **4.5×**|       405.1 → 403.9 MB       |
-| MLP `[8,256,256,256,1]` (ensemble unfold) |  10 |        960 µs  |          **516 µs** | **1.9×**|        21.0 → 20.5 MB        |
 
 The speedup grows with ensemble size — at `N=100` the Python-loop launch overhead
 dominates the baseline, while `torchstrap` issues one fused launch per parameter. Peak
