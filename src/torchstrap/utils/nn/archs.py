@@ -18,7 +18,7 @@ from torch.nn import Module
 
 import torch.nn.functional as F
 
-from churten.utils._utils import params_for
+from torchstrap.utils._utils import params_for
 
 @runtime_checkable
 class TensorCallable(Protocol):

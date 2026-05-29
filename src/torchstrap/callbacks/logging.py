@@ -14,7 +14,7 @@ import numpy as np
 import tqdm
 from tabulate import tabulate
 
-from churten.utils import Ansi
+from torchstrap.utils import Ansi
 from .callbacks import Callback
 
 def filter_log_keys(keys, keys_ignored=None):

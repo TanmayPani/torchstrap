@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.nn.functional import binary_cross_entropy_with_logits
 from torch.func import functional_call, vmap, grad_and_value, stack_module_state
 
-from churten.optimizer import Adam
+from torchstrap.optimizer import Adam
 
 def loss_fn(base_model, params, inputs, targets):
     preds = functional_call(base_model, (params, {}), inputs)

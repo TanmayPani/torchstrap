@@ -8,9 +8,9 @@ from beartype.typing import Callable
 
 import torch
 
-from churten.callbacks import Callback
-from churten.utils import noop, _check_f_arguments, open_file_like
-from churten.utils.typing import BoolVector
+from torchstrap.callbacks import Callback
+from torchstrap.utils import noop, _check_f_arguments, open_file_like
+from torchstrap.utils.typing import BoolVector
 
 class Checkpoint(Callback):
     """Save the model during training if the given metric improved.

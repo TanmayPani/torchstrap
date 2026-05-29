@@ -3,7 +3,7 @@ from beartype.typing import Any, Optional
 import torch
 from torch import Tensor
 
-from churten.state import State
+from torchstrap.state import State
 
 class GradientTransformation(type):
     def __new__(

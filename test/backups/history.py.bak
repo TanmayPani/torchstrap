@@ -5,7 +5,7 @@ import pickle
 
 from optree import register_pytree_node_class
 
-from churten.utils import open_file_like
+from torchstrap.utils import open_file_like
 
 # pylint: disable=invalid-name
 class _none:
@@ -106,7 +106,7 @@ def _unpack_index(i):
     return i_e, k_e, i_b, k_b
 
 
-@register_pytree_node_class(namespace="churten.history")
+@register_pytree_node_class(namespace="torchstrap.history")
 class History(list):
     def __tree_flatten__(self):
         return list(self), None, None

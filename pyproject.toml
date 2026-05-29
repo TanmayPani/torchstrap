@@ -1,7 +1,7 @@
 [project] 
-name = "churten"
+name = "torchstrap"
 version = "0.0.2"
-description = "Add your description here"
+description = "Train ensembles of model replicas in parallel on PyTorch — vmap-vectorized, stateless, with a fused batched Adam optimizer."
 readme = "README.md"
 authors = [
     { name = "TanmayPani", email = "tanmay.pani.rutgers@gmail.com" }

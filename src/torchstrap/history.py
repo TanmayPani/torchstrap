@@ -14,7 +14,7 @@ from optree import treespec_one_level, treespec_list, treespec_leaf
 
 from torch import Tensor
 
-from churten.utils import open_file_like
+from torchstrap.utils import open_file_like
 
 MISSING = object()
 
@@ -31,7 +31,7 @@ dict_list = partial(defaultdict, list)
 def is_list(x):
     return is_bearable(x, hint=list)
 
-@register_pytree_node_class(namespace="churten.history")
+@register_pytree_node_class(namespace="torchstrap.history")
 class History(defaultdict):
     @property
     def num_epochs(self) -> int:
@@ -103,7 +103,7 @@ class History(defaultdict):
             func or (lambda x: x), self, 
             inner_treespec=treespec_list([treespec_leaf()]*self.num_epochs), 
             is_leaf = is_list, 
-            namespace="churten.history",
+            namespace="torchstrap.history",
         )
 
     def __missing__(self, key):

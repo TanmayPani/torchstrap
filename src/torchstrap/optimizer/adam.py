@@ -8,12 +8,12 @@ from optree import tree_map, tree_map_
 import torch
 from torch import Tensor
 
-from churten.utils.typing import Vector, FloatScalarLike
-from churten.state import OptimState
-from churten.optimizer.grad_transform import GradientTransformation
+from torchstrap.utils.typing import Vector, FloatScalarLike
+from torchstrap.state import OptimState
+from torchstrap.optimizer.grad_transform import GradientTransformation
 
 
-@dataclass(namespace="churten.state")
+@dataclass(namespace="torchstrap.state")
 class AdamState(OptimState):
     exp_avgs               : list[Tensor] = field(default_factory=list)
     exp_avg_sqs            : list[Tensor] = field(default_factory=list)
@@ -257,7 +257,7 @@ def _adam_step_vmap(
 # Assignment form (not @decorator) so beartype's claw doesn't wrap the
 # resulting CustomOpDef and strip its register_fake / register_vmap methods.
 adam_step_ = torch.library.custom_op(
-    "churten::adam_step_",
+    "torchstrap::adam_step_",
     _adam_step_impl,
     mutates_args={"params", "exp_avgs", "exp_avg_sqs",
                   "max_exp_avg_sqs", "state_steps"},
@@ -279,24 +279,39 @@ try:
     import os
     import helion
     import helion.language as hl
-    _HELION_AUTOTUNE_EFFORT = os.environ.get("CHURTEN_HELION_EFFORT", "quick")
+    _HELION_AUTOTUNE_EFFORT = os.environ.get("TORCHSTRAP_HELION_EFFORT", "quick")
+
+    # Seed-config hook for `autotune_seed_configs=`: seeds the autotuner's
+    # initial population from a vetted config without constraining the search.
+    # Left `None` on purpose. A single captured config can NOT be seeded here
+    # because amsgrad/maximize/decoupled_wd are hl.constexpr — each of the 8
+    # flag combinations compiles to a distinct specialization with a different
+    # config-encoding dimension, so seeding one config raises an encoding-length
+    # AssertionError on the other specializations. And it isn't needed: quick
+    # autotune already converges to the same optimum a full-effort run finds
+    # (e.g. block_sizes=[1, 32] on the multifold MLP shapes). The hook stays so a
+    # user who pins the flags for a build can opt in.
+    _ADAM_SEED_CONFIG = None  # type: helion.Config | None
 
     # `static_shapes=False` compiles a single shape-generic kernel — without it,
-    # every distinct (R, *p_i) combination triggers a fresh autotune cycle which
-    # can take minutes. `autotune_effort='quick'` keeps first-run startup bounded
-    # at the cost of a few % perf; set `CHURTEN_HELION_EFFORT=full` for
-    # production runs where peak perf matters.
-    @helion.kernel(
+    # every distinct (R, per_rep) combination triggers a fresh autotune cycle.
+    # `autotune_effort='quick'` keeps first-run startup bounded; set
+    # `TORCHSTRAP_HELION_EFFORT=full` for a peak-perf autotune run.
+    _HELION_KERNEL_KWARGS: dict = dict(
         static_shapes=False,
         autotune_effort=_HELION_AUTOTUNE_EFFORT,
     )
+    if _ADAM_SEED_CONFIG is not None:
+        _HELION_KERNEL_KWARGS["autotune_seed_configs"] = [_ADAM_SEED_CONFIG]
+
+    @helion.kernel(**_HELION_KERNEL_KWARGS)
     def _adam_kernel_helion(
-        p:    Tensor,
+        p:    Tensor,   # (R, per_rep)
         g:    Tensor,
         m:    Tensor,
         v:    Tensor,
         mx:   Tensor,
-        lr_r: Tensor,
+        lr_r: Tensor,   # (R,)
         b1_r: Tensor,
         b2_r: Tensor,
         eps_r: Tensor,
@@ -304,57 +319,53 @@ try:
         mask_r: Tensor,
         bc1_r: Tensor,
         bc2_r: Tensor,
-        per_rep: int,
         amsgrad: hl.constexpr,
         maximize: hl.constexpr,
         decoupled_wd: hl.constexpr,
     ) -> None:
-        n = p.size(0)
-        for tile in hl.tile(n):
-            offs = tile.index
-            rep  = offs // per_rep
+        R, n = p.shape
+        for tile_r, tile_n in hl.tile([R, n]):
+            # Per-replica scalars load once per replica-tile as (block_r,) and
+            # reshape to (block_r, 1) so they broadcast over the per_rep axis.
+            lr_e   = lr_r[tile_r][:, None]
+            b1_e   = b1_r[tile_r][:, None]
+            b2_e   = b2_r[tile_r][:, None]
+            eps_e  = eps_r[tile_r][:, None]
+            wd_e   = wd_r[tile_r][:, None]
+            bc1_e  = bc1_r[tile_r][:, None]
+            bc2_e  = bc2_r[tile_r][:, None]
+            # Full (block_r, block_n) mask: inactive replicas are simply never
+            # stored, so no read-back / torch.where is needed.
+            active = (mask_r[tile_r][:, None] != 0) & (tile_n.index[None, :] >= 0)
 
-            active = mask_r[rep]
-            lr_e   = lr_r[rep]
-            b1_e   = b1_r[rep]
-            b2_e   = b2_r[rep]
-            eps_e  = eps_r[rep]
-            wd_e   = wd_r[rep]
-            bc1_e  = bc1_r[rep]
-            bc2_e  = bc2_r[rep]
-
-            p_orig = p[tile]
-            g_e    = g[tile]
-            m_e    = m[tile]
-            v_e    = v[tile]
+            p_e = p[tile_r, tile_n]
+            g_e = g[tile_r, tile_n]
+            m_e = m[tile_r, tile_n]
+            v_e = v[tile_r, tile_n]
 
             if maximize:
                 g_e = -g_e
-            # Keep the post-decay (or pre-decay) value used for the m/v math
-            # separate from the original p — the masked store at the bottom
-            # must restore byte-identical values for inactive replicas.
             if decoupled_wd:
-                p_decayed = p_orig * (1.0 - lr_e * wd_e)
+                p_e = p_e * (1.0 - lr_e * wd_e)
             else:
-                p_decayed = p_orig
-                g_e = g_e + p_orig * wd_e
+                g_e = g_e + p_e * wd_e
 
             m_new = m_e * b1_e + g_e * (1.0 - b1_e)
             v_new = v_e * b2_e + g_e * g_e * (1.0 - b2_e)
 
             if amsgrad:
-                mx_e   = mx[tile]
+                mx_e   = mx[tile_r, tile_n]
                 mx_new = torch.maximum(mx_e, v_new)
                 denom  = torch.sqrt(mx_new) / torch.sqrt(bc2_e) + eps_e
-                mx[tile] = torch.where(active != 0, mx_new, mx_e)
+                hl.store(mx, [tile_r, tile_n], mx_new, extra_mask=active)
             else:
                 denom = torch.sqrt(v_new) / torch.sqrt(bc2_e) + eps_e
 
-            p_new = p_decayed - (lr_e / bc1_e) * m_new / denom
+            p_new = p_e - (lr_e / bc1_e) * m_new / denom
 
-            p[tile] = torch.where(active != 0, p_new, p_orig)
-            m[tile] = torch.where(active != 0, m_new, m_e)
-            v[tile] = torch.where(active != 0, v_new, v_e)
+            hl.store(p, [tile_r, tile_n], p_new, extra_mask=active)
+            hl.store(m, [tile_r, tile_n], m_new, extra_mask=active)
+            hl.store(v, [tile_r, tile_n], v_new, extra_mask=active)
 
 
     def _adam_step_cuda(
@@ -385,20 +396,20 @@ try:
             params, grads, exp_avgs, exp_avg_sqs, mx_iter, state_steps,
         ):
             R = s.shape[0]
-            per_rep = p.numel() // R
             bc1 = 1.0 - beta1.pow(s)
             bc2 = 1.0 - beta2.pow(s)
 
+            # Reshape the stacked (R, *p_i) state to (R, per_rep) so the kernel
+            # tiles over (replica, per_replica) — contiguous, so this is a view.
             # `mx` must be a real tensor for Helion's signature; when not
-            # amsgrad, alias to `p` and the constexpr branch in the kernel
-            # ensures it's never read or written.
-            mx_arg = mx.view(-1) if amsgrad else p.view(-1)
+            # amsgrad, alias to `p` and the constexpr branch never touches it.
+            mx_arg = (mx if amsgrad else p).reshape(R, -1)
 
             _adam_kernel_helion(
-                p.view(-1), g.view(-1), m.view(-1), v.view(-1), mx_arg,
+                p.reshape(R, -1), g.reshape(R, -1), m.reshape(R, -1),
+                v.reshape(R, -1), mx_arg,
                 lr, beta1, beta2, eps, weight_decay, mask_int,
                 bc1, bc2,
-                per_rep,
                 hl.constexpr(amsgrad),
                 hl.constexpr(maximize),
                 hl.constexpr(decoupled_weight_decay),

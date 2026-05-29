@@ -7,7 +7,7 @@ from torch.optim import AdamW
 from torch.nn.functional import binary_cross_entropy_with_logits
 from torch.func import functional_call, vmap, grad_and_value, stack_module_state
 
-from churten.optimizer import AdamState
+from torchstrap.optimizer import AdamState
 import optree
 
 
@@ -24,7 +24,7 @@ if __name__ == "__main__":
     print(states["0.weight"].shape)
 
     adam_state = AdamState.from_param_dict(states, batch_dim=0)
-    spc = optree.tree_structure(adam_state, namespace="churten.state")
+    spc = optree.tree_structure(adam_state, namespace="torchstrap.state")
     print(optree.treespec_paths(spc))
     with torch.no_grad():
         stub = adam_state.unbind()

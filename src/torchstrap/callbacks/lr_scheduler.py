@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.lr_scheduler import StepLR
 from torch.optim.optimizer import Optimizer
  
-from churten.callbacks import Callback
+from torchstrap.callbacks import Callback
 
 __all__ = ['LRScheduler', 'WarmRestartLR']
 

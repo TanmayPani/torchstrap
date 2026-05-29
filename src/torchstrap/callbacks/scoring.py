@@ -9,8 +9,8 @@ import math
 
 import torch
 
-from churten.utils import to_numpy
-from churten.utils import to_device
+from torchstrap.utils import to_numpy
+from torchstrap.utils import to_device
 
 from .callbacks import Callback
 

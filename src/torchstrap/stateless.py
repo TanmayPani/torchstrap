@@ -23,11 +23,11 @@ from optree import tree_structure, treespec_accessors
 from optree import tree_transpose, treespec_one_level
 from optree import treespec_list, treespec_dict, treespec_leaf
 
-from churten.optimizer import GradientTransformation
-from churten.callbacks import Callback, PrintLog, PassThroughScoring, EpochTimer
-from churten.state import State
-from churten.history import History
-from churten.utils.typing import LoaderT
+from torchstrap.optimizer import GradientTransformation
+from torchstrap.callbacks import Callback, PrintLog, PassThroughScoring, EpochTimer
+from torchstrap.state import State
+from torchstrap.history import History
+from torchstrap.utils.typing import LoaderT
 
 
 class StatelessModule(Module):

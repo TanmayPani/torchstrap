@@ -14,9 +14,9 @@ from torch.nn.functional import binary_cross_entropy_with_logits, sigmoid
 
 from torch.distributions import Categorical
 
-from churten.stateless import StatelessModule
-from churten.optimizer import Adam
-from churten.callbacks import Checkpoint, EarlyStopping
+from torchstrap.stateless import StatelessModule
+from torchstrap.optimizer import Adam
+from torchstrap.callbacks import Checkpoint, EarlyStopping
 
 def make_spirals(n_samples, noise_std=0., rotations=1.):
     ts = torch.linspace(0, 1, n_samples)

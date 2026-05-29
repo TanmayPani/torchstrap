@@ -1,4 +1,4 @@
-from churten.utils.data.sampler import *
+from torchstrap.utils.data.sampler import *
 __all__ = [ 
             "random_split",
             "undersample",

@@ -16,8 +16,8 @@ from optree import tree_transpose_map, tree_transpose_map_with_path
 from optree import tree_flatten, tree_unflatten
 from optree import treespec_entries
 
-from churten.utils.typing import Vector 
-from churten.callbacks import Checkpoint
+from torchstrap.utils.typing import Vector 
+from torchstrap.callbacks import Checkpoint
 
 @dataclasses.dataclass
 class State:
@@ -252,7 +252,7 @@ class State:
         self.model_index_list = state["metadata"]["model_index_list"]
         self.model_status_list = state["metadata"]["model_status_list"]
 
-@dataclass(namespace="churten.state")
+@dataclass(namespace="torchstrap.state")
 class OptimState:
     param_names    : list[str]    = field(default_factory=list, pytree_node=False)
     batch_size     : Size         = field(default_factory=Size)
@@ -423,9 +423,9 @@ class OptimState:
         batch_size : tuple | list,
         **kwargs,
     ) -> Self:
-        with dict_insertion_ordered(True, namespace="churten.state"):
+        with dict_insertion_ordered(True, namespace="torchstrap.state"):
             params, param_spec = tree_flatten(
-                param_pytree, namespace="churten.state",
+                param_pytree, namespace="torchstrap.state",
             )
         param_names = treespec_entries(param_spec)
         for key, val in kwargs.items():
@@ -455,6 +455,6 @@ class OptimState:
             self.unbind_leaf, 
             self, 
             none_is_leaf=True, 
-            namespace="churten.state", 
+            namespace="torchstrap.state", 
         )
 
